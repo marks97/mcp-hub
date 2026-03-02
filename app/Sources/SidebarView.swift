@@ -1,53 +1,59 @@
 import SwiftUI
 
-/// Sidebar listing all registered projects with selection, context menus, and Add Project action.
+/// Sidebar listing all registered projects with selection, context menus, and Add Project button.
 struct SidebarView: View {
     @EnvironmentObject var appState: AppState
 
     var body: some View {
-        List(selection: Binding(
-            get: { appState.selectedProject },
-            set: { project in
-                if let project {
-                    appState.selectProject(project)
+        VStack(spacing: 0) {
+            List(selection: Binding(
+                get: { appState.selectedProject?.id },
+                set: { id in
+                    if let id, let project = appState.projects.first(where: { $0.id == id }) {
+                        appState.selectProject(project)
+                    }
                 }
-            }
-        )) {
-            Section("Projects") {
-                ForEach(appState.projects) { project in
-                    NavigationLink(value: project) {
+            )) {
+                Section("Projects") {
+                    ForEach(appState.projects) { project in
                         ProjectRow(project: project)
-                    }
-                    .contextMenu {
-                        Button {
-                            appState.openProject(project)
-                        } label: {
-                            Label("Open in Finder", systemImage: "folder")
-                        }
+                            .tag(project.id)
+                            .contextMenu {
+                                Button {
+                                    appState.openProject(project)
+                                } label: {
+                                    Label("Open in Finder", systemImage: "folder")
+                                }
 
-                        Divider()
+                                Divider()
 
-                        Button(role: .destructive) {
-                            appState.removeProject(project)
-                        } label: {
-                            Label("Remove Project", systemImage: "trash")
-                        }
+                                Button(role: .destructive) {
+                                    appState.removeProject(project)
+                                } label: {
+                                    Label("Remove Project", systemImage: "trash")
+                                }
+                            }
                     }
                 }
             }
-        }
-        .listStyle(.sidebar)
-        .frame(minWidth: Theme.sidebarWidth)
-        .toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                Button {
-                    appState.showAddProject()
-                } label: {
-                    Label("Add Project", systemImage: "plus")
-                }
-                .help("Add a project folder")
+            .listStyle(.sidebar)
+
+            Divider()
+
+            Button {
+                appState.showAddProject()
+            } label: {
+                Label("Add Project", systemImage: "plus")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(Theme.textSecondary)
             }
+            .buttonStyle(.plain)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .help("Add a project folder")
         }
+        .background(Theme.sidebarBackground)
         .overlay {
             if appState.projects.isEmpty {
                 EmptySidebarView()

@@ -7,3 +7,5 @@ node_modules/
 *.xcworkspace
 xcuserdata/
 DerivedData/
+.claude/worktrees
+.mcp.json

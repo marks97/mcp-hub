@@ -10,7 +10,6 @@ struct ClaudeHubApp: App {
             MainWindowView()
                 .environmentObject(appState)
         }
-        .windowStyle(.titleBar)
         .defaultSize(width: 900, height: 600)
         .commands {
             CommandGroup(replacing: .newItem) {}

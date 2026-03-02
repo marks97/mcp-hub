@@ -1,68 +1,87 @@
 import SwiftUI
 
-/// Root view: NavigationSplitView with sidebar and detail pane, plus toolbar actions.
+/// Root view: custom top bar spanning full width, with sidebar and detail below.
 struct MainWindowView: View {
     @EnvironmentObject var appState: AppState
+    @State private var isSpinning = false
+
+    private var isLoading: Bool {
+        appState.isDiscovering || appState.isRestarting
+    }
 
     var body: some View {
-        NavigationSplitView {
-            SidebarView()
-        } detail: {
-            DetailView()
-        }
-        .navigationSplitViewStyle(.balanced)
-        .toolbar {
-            ToolbarItemGroup(placement: .primaryAction) {
-                claudeStatusIndicator
-
-                Button {
-                    appState.discoverTools()
-                } label: {
-                    if appState.isDiscovering {
-                        ProgressView()
-                            .controlSize(.small)
-                    } else {
-                        Label("Scan Tools", systemImage: "arrow.triangle.2.circlepath")
-                    }
-                }
-                .disabled(appState.isDiscovering || appState.selectedProject == nil)
-                .help("Discover available tools from MCP servers")
-
-                Button {
-                    if appState.isClaudeRunning {
-                        appState.applyAndRestart()
-                    } else {
-                        appState.startClaude()
-                    }
-                } label: {
-                    if appState.isRestarting {
-                        ProgressView()
-                            .controlSize(.small)
-                    } else if appState.isClaudeRunning {
-                        Label("Apply & Restart", systemImage: "arrow.clockwise")
-                    } else {
-                        Label("Start Claude", systemImage: "play.fill")
-                    }
-                }
-                .disabled(appState.isRestarting)
-                .help(appState.isClaudeRunning ? "Save config and restart Claude Desktop" : "Start Claude Desktop")
+        VStack(spacing: 0) {
+            topBar
+            Divider()
+            HStack(spacing: 0) {
+                SidebarView()
+                    .frame(width: Theme.sidebarWidth)
+                Divider()
+                DetailView()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
         .frame(
             minWidth: Theme.windowMinWidth,
             minHeight: Theme.windowMinHeight
         )
+        .onChange(of: isLoading) { _, loading in
+            isSpinning = loading
+        }
+    }
+
+    // MARK: - Top Bar
+
+    private var topBar: some View {
+        HStack {
+            claudeStatusIndicator
+            Spacer()
+            refreshButton
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(Theme.windowBackground)
     }
 
     private var claudeStatusIndicator: some View {
-        HStack(spacing: 6) {
-            Circle()
-                .fill(appState.isClaudeRunning ? Theme.green : Theme.red)
-                .frame(width: 8, height: 8)
-            Text(appState.isClaudeRunning ? "Claude Running" : "Claude Stopped")
-                .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(Theme.textSecondary)
+        Button {
+            if appState.isClaudeRunning {
+                appState.applyAndRestart()
+            } else {
+                appState.startClaude()
+            }
+        } label: {
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(appState.isClaudeRunning ? Theme.green : Theme.red)
+                    .frame(width: 8, height: 8)
+                Text(appState.isClaudeRunning ? "Claude Running" : "Claude Stopped")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(Theme.textSecondary)
+            }
         }
-        .padding(.trailing, 8)
+        .buttonStyle(.plain)
+        .disabled(appState.isRestarting)
+        .help(appState.isClaudeRunning ? "Click to restart Claude Desktop" : "Click to start Claude Desktop")
+    }
+
+    private var refreshButton: some View {
+        Button {
+            appState.discoverTools()
+        } label: {
+            Image(systemName: "arrow.triangle.2.circlepath")
+                .font(.system(size: 14, weight: .medium))
+                .foregroundStyle(isLoading ? Theme.orange : Theme.textSecondary)
+                .rotationEffect(.degrees(isSpinning ? 360 : 0))
+                .animation(
+                    isSpinning
+                        ? .linear(duration: 1).repeatForever(autoreverses: false)
+                        : .default,
+                    value: isSpinning
+                )
+        }
+        .buttonStyle(.plain)
+        .disabled(isLoading || appState.selectedProject == nil)
+        .help("Scan tools")
     }
 }
