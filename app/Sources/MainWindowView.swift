@@ -18,18 +18,16 @@ struct MainWindowView: View {
         }
         .navigationSplitViewStyle(.balanced)
         .toolbar {
-            ToolbarItem(placement: .automatic) {
+            ToolbarItemGroup(placement: .primaryAction) {
+                claudeStatusIndicator
+                refreshButton
+
                 Button {
                     appState.showAddProject()
                 } label: {
                     Label("Add Project", systemImage: "plus")
                 }
                 .help("Add a project folder")
-            }
-
-            ToolbarItemGroup(placement: .primaryAction) {
-                claudeStatusIndicator
-                refreshButton
             }
         }
         .frame(
