@@ -30,6 +30,7 @@ mkdir -p "$APP_DIR/Contents/Resources"
 
 cp ".build/release/ClaudeDesktopManager" "$APP_DIR/Contents/MacOS/ClaudeDesktopManager"
 cp Info.plist "$APP_DIR/Contents/Info.plist"
+cp AppIcon.icns "$APP_DIR/Contents/Resources/AppIcon.icns"
 
 echo "Installing launch agent (start at login)..."
 mkdir -p "$LAUNCH_AGENT_DIR"
