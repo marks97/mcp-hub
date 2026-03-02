@@ -1,24 +1,35 @@
 import SwiftUI
 
-/// Root view: custom top bar spanning full width, with sidebar and detail below.
+/// Root view: NavigationSplitView with foldable sidebar and unified toolbar.
 struct MainWindowView: View {
     @EnvironmentObject var appState: AppState
     @State private var isSpinning = false
+    @State private var columnVisibility: NavigationSplitViewVisibility = .doubleColumn
 
     private var isLoading: Bool {
         appState.isDiscovering || appState.isRestarting
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            topBar
-            Divider()
-            HStack(spacing: 0) {
-                SidebarView()
-                    .frame(width: Theme.sidebarWidth)
-                Divider()
-                DetailView()
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+        NavigationSplitView(columnVisibility: $columnVisibility) {
+            SidebarView()
+        } detail: {
+            DetailView()
+        }
+        .navigationSplitViewStyle(.balanced)
+        .toolbar {
+            ToolbarItem(placement: .automatic) {
+                Button {
+                    appState.showAddProject()
+                } label: {
+                    Label("Add Project", systemImage: "plus")
+                }
+                .help("Add a project folder")
+            }
+
+            ToolbarItemGroup(placement: .primaryAction) {
+                claudeStatusIndicator
+                refreshButton
             }
         }
         .frame(
@@ -28,19 +39,6 @@ struct MainWindowView: View {
         .onChange(of: isLoading) { _, loading in
             isSpinning = loading
         }
-    }
-
-    // MARK: - Top Bar
-
-    private var topBar: some View {
-        HStack {
-            claudeStatusIndicator
-            Spacer()
-            refreshButton
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
-        .background(Theme.windowBackground)
     }
 
     private var claudeStatusIndicator: some View {
@@ -59,6 +57,7 @@ struct MainWindowView: View {
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(Theme.textSecondary)
             }
+            .padding(.vertical, 4)
         }
         .buttonStyle(.plain)
         .disabled(appState.isRestarting)
