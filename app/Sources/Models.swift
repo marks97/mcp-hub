@@ -91,3 +91,55 @@ class ServerState: ObservableObject, Identifiable {
         tools.filter(\.enabled).count
     }
 }
+
+// MARK: - Per-Project Claude Instance
+
+/// Tracks the Claude Desktop instance state for a single project.
+struct ProjectInstanceInfo {
+    var isRunning: Bool = false
+    var isRestarting: Bool = false
+    var pid: Int32? = nil
+}
+
+// MARK: - App Settings
+
+/// Persisted application settings.
+struct AppSettings: Codable {
+    var projectIsolation: Bool = false
+    var registryURLs: [String] = ["https://registry.modelcontextprotocol.io/v0.1/servers"]
+}
+
+// MARK: - MCP Registry API
+
+struct RegistrySearchResponse: Codable {
+    let servers: [RegistryServer]?
+    let metadata: RegistryMetadata?
+}
+
+struct RegistryServer: Identifiable, Codable {
+    var id: String { server.name }
+    let server: RegistryServerDetail
+}
+
+struct RegistryServerDetail: Codable {
+    let name: String
+    let description: String?
+    let packages: [RegistryPackage]?
+}
+
+struct RegistryPackage: Codable {
+    let registryType: String
+    let identifier: String
+    let packageArguments: [RegistryArgument]?
+}
+
+struct RegistryArgument: Codable {
+    let name: String
+    let description: String?
+    let isRequired: Bool?
+}
+
+struct RegistryMetadata: Codable {
+    let nextCursor: String?
+    let count: Int?
+}

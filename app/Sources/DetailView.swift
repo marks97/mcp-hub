@@ -19,6 +19,8 @@ struct DetailView: View {
 struct ProjectDetailView: View {
     let project: Project
     @EnvironmentObject var appState: AppState
+    @State private var showAddServer = false
+    @State private var showMarketplace = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -40,6 +42,14 @@ struct ProjectDetailView: View {
             }
         }
         .background(Theme.pampas.opacity(0.3))
+        .sheet(isPresented: $showAddServer) {
+            AddServerSheet()
+                .environmentObject(appState)
+        }
+        .sheet(isPresented: $showMarketplace) {
+            MarketplaceSheet()
+                .environmentObject(appState)
+        }
     }
 
     private var projectHeader: some View {
@@ -71,11 +81,48 @@ struct ProjectDetailView: View {
                 .transition(.opacity.animation(.easeIn(duration: 0.15)))
             }
 
+            actionButtons
             serverSummary
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 14)
         .background(Theme.windowBackground)
+    }
+
+    private var actionButtons: some View {
+        HStack(spacing: 8) {
+            Button {
+                showAddServer = true
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "plus")
+                    Text("Add Server")
+                }
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(Theme.orange)
+                .clipShape(RoundedRectangle(cornerRadius: Theme.smallCornerRadius))
+            }
+            .buttonStyle(.plain)
+
+            Button {
+                showMarketplace = true
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "square.grid.2x2")
+                    Text("Marketplace")
+                }
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(Theme.blue)
+                .clipShape(RoundedRectangle(cornerRadius: Theme.smallCornerRadius))
+            }
+            .buttonStyle(.plain)
+        }
     }
 
     private var serverSummary: some View {
@@ -122,25 +169,43 @@ struct ProjectDetailView: View {
                 .font(.system(size: 14, weight: .medium))
                 .foregroundStyle(Theme.textSecondary)
 
-            Text("Add servers to .claude/infra/.mcp.json")
+            Text("Add a server manually or browse the marketplace")
                 .font(.system(size: 12))
                 .foregroundStyle(Theme.textTertiary)
 
-            Button {
-                appState.openProject(project)
-            } label: {
-                HStack(spacing: 4) {
-                    Image(systemName: "folder")
-                    Text("Open Project Folder")
+            HStack(spacing: 12) {
+                Button {
+                    showAddServer = true
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "plus")
+                        Text("Add Server")
+                    }
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(Theme.orange)
+                    .clipShape(RoundedRectangle(cornerRadius: Theme.smallCornerRadius))
                 }
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(Theme.orange)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 6)
-                .background(Theme.orange.opacity(0.1))
-                .clipShape(RoundedRectangle(cornerRadius: Theme.smallCornerRadius))
+                .buttonStyle(.plain)
+
+                Button {
+                    showMarketplace = true
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "square.grid.2x2")
+                        Text("Marketplace")
+                    }
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(Theme.blue)
+                    .clipShape(RoundedRectangle(cornerRadius: Theme.smallCornerRadius))
+                }
+                .buttonStyle(.plain)
             }
-            .buttonStyle(.plain)
 
             Spacer()
         }

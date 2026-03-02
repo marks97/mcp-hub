@@ -50,9 +50,14 @@ struct SidebarView: View {
 struct ProjectRow: View {
     let project: Project
     @EnvironmentObject var appState: AppState
+    @State private var isHovered = false
 
     private var isSelected: Bool {
         appState.selectedProject?.id == project.id
+    }
+
+    private var instanceInfo: ProjectInstanceInfo {
+        appState.projectInstances[project.id] ?? ProjectInstanceInfo()
     }
 
     var body: some View {
@@ -72,8 +77,35 @@ struct ProjectRow: View {
                     .foregroundStyle(Theme.textTertiary)
                     .lineLimit(1)
             }
+
+            Spacer()
+
+            if isHovered || instanceInfo.isRestarting {
+                HStack(spacing: 4) {
+                    // Play/restart button (only when isolation is ON)
+                    if appState.settings.projectIsolation {
+                        ProjectPlayButton(project: project)
+                    }
+
+                    // Remove button
+                    Button {
+                        appState.removeProject(project)
+                    } label: {
+                        Image(systemName: "trash")
+                            .font(.system(size: 10))
+                            .foregroundStyle(Theme.red)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Remove project")
+                }
+                .transition(.opacity.animation(.easeInOut(duration: 0.15)))
+            }
         }
         .padding(.vertical, 2)
+        .contentShape(Rectangle())
+        .onHover { hovering in
+            isHovered = hovering
+        }
     }
 
     private func abbreviatedPath(_ path: String) -> String {
@@ -82,6 +114,39 @@ struct ProjectRow: View {
             return "~" + path.dropFirst(home.count)
         }
         return path
+    }
+}
+
+/// Play/restart button for a project's Claude Desktop instance (isolation mode).
+struct ProjectPlayButton: View {
+    @EnvironmentObject var appState: AppState
+    let project: Project
+
+    private var info: ProjectInstanceInfo {
+        appState.projectInstances[project.id] ?? ProjectInstanceInfo()
+    }
+
+    var body: some View {
+        Button {
+            if info.isRunning {
+                appState.restartClaudeForProject(project)
+            } else {
+                appState.launchClaudeForProject(project)
+            }
+        } label: {
+            if info.isRestarting {
+                ProgressView()
+                    .controlSize(.mini)
+                    .frame(width: 14, height: 14)
+            } else {
+                Image(systemName: info.isRunning ? "arrow.clockwise" : "play.fill")
+                    .font(.system(size: 10))
+                    .foregroundStyle(info.isRunning ? Theme.orange : Theme.green)
+            }
+        }
+        .buttonStyle(.plain)
+        .disabled(info.isRestarting)
+        .help(info.isRunning ? "Restart Claude" : "Start Claude")
     }
 }
 
@@ -99,7 +164,7 @@ struct EmptySidebarView: View {
                 .font(.system(size: 14, weight: .medium))
                 .foregroundStyle(Theme.textSecondary)
 
-            Text("Add a project folder that contains\n.claude/infra/.mcp.json")
+            Text("Add a project folder to manage\nits MCP servers")
                 .font(.system(size: 12))
                 .foregroundStyle(Theme.textTertiary)
                 .multilineTextAlignment(.center)

@@ -7,7 +7,7 @@ struct MainWindowView: View {
     @State private var columnVisibility: NavigationSplitViewVisibility = .doubleColumn
 
     private var isLoading: Bool {
-        appState.isDiscovering || appState.isRestarting
+        appState.isDiscovering || appState.anyProjectRestarting
     }
 
     var body: some View {
@@ -40,26 +40,62 @@ struct MainWindowView: View {
     }
 
     private var claudeStatusIndicator: some View {
-        Button {
-            if appState.isClaudeRunning {
-                appState.applyAndRestart()
+        Group {
+            if appState.settings.projectIsolation {
+                // Per-project isolation: show selected project's instance state
+                let info = selectedProjectInfo
+                Button {
+                    guard let project = appState.selectedProject else { return }
+                    if info.isRunning {
+                        appState.restartClaudeForProject(project)
+                    } else {
+                        appState.launchClaudeForProject(project)
+                    }
+                } label: {
+                    HStack(spacing: 6) {
+                        Circle()
+                            .fill(info.isRunning ? Theme.green : Theme.red)
+                            .frame(width: 8, height: 8)
+                        Text(info.isRunning ? "Claude Running" : "Claude Stopped")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(Theme.textSecondary)
+                    }
+                    .padding(.vertical, 4)
+                }
+                .buttonStyle(.plain)
+                .padding(.trailing, 12)
+                .disabled(info.isRestarting || appState.selectedProject == nil)
+                .help(info.isRunning ? "Click to restart Claude for this project" : "Click to start Claude for this project")
             } else {
-                appState.startClaude()
+                // Global: single Claude instance
+                Button {
+                    if appState.isClaudeRunning {
+                        appState.applyAndRestart()
+                    } else {
+                        appState.startClaude()
+                    }
+                } label: {
+                    HStack(spacing: 6) {
+                        Circle()
+                            .fill(appState.isClaudeRunning ? Theme.green : Theme.red)
+                            .frame(width: 8, height: 8)
+                        Text(appState.isClaudeRunning ? "Claude Running" : "Claude Stopped")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(Theme.textSecondary)
+                    }
+                    .padding(.vertical, 4)
+                }
+                .buttonStyle(.plain)
+                .padding(.trailing, 12)
+                .disabled(appState.isRestarting)
+                .help(appState.isClaudeRunning ? "Click to restart Claude Desktop" : "Click to start Claude Desktop")
             }
-        } label: {
-            HStack(spacing: 6) {
-                Circle()
-                    .fill(appState.isClaudeRunning ? Theme.green : Theme.red)
-                    .frame(width: 8, height: 8)
-                Text(appState.isClaudeRunning ? "Claude Running" : "Claude Stopped")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(Theme.textSecondary)
-            }
-            .padding(.vertical, 4)
         }
-        .buttonStyle(.plain)
-        .disabled(appState.isRestarting)
-        .help(appState.isClaudeRunning ? "Click to restart Claude Desktop" : "Click to start Claude Desktop")
+    }
+
+    private var selectedProjectInfo: ProjectInstanceInfo {
+        guard let project = appState.selectedProject else { return ProjectInstanceInfo() }
+        return appState.projectInstances[project.id] ?? ProjectInstanceInfo()
     }
 
     private var refreshButton: some View {

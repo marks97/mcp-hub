@@ -65,7 +65,7 @@ struct ServerCardView: View {
                 .transition(.opacity.combined(with: .move(edge: .top)))
             }
 
-            // Command info
+            // Command info + remove button
             if server.isExpanded {
                 Divider()
                     .foregroundStyle(Theme.cardBorder)
@@ -79,6 +79,25 @@ struct ServerCardView: View {
                         .foregroundStyle(Theme.textTertiary)
                         .lineLimit(1)
                     Spacer()
+
+                    Button {
+                        withAnimation {
+                            appState.removeServer(name: server.name)
+                        }
+                    } label: {
+                        HStack(spacing: 3) {
+                            Image(systemName: "trash")
+                                .font(.system(size: 9))
+                            Text("Remove")
+                                .font(.system(size: 10, weight: .medium))
+                        }
+                        .foregroundStyle(Theme.red)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Theme.red.opacity(0.1))
+                        .clipShape(RoundedRectangle(cornerRadius: 4))
+                    }
+                    .buttonStyle(.plain)
                 }
                 .padding(.horizontal, 14)
                 .padding(.vertical, 8)

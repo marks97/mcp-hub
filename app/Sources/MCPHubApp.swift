@@ -14,5 +14,10 @@ struct ClaudeHubApp: App {
         .commands {
             CommandGroup(replacing: .newItem) {}
         }
+
+        Settings {
+            SettingsView()
+                .environmentObject(appState)
+        }
     }
 }
