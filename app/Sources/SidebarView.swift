@@ -1,54 +1,41 @@
 import SwiftUI
 
-/// Sidebar listing all registered projects with selection and context menus.
-/// Uses manual selection with custom row backgrounds to avoid macOS blue accent.
+/// Sidebar listing all registered projects.
+/// Uses ScrollView instead of List to fully bypass AppKit's blue selection highlight.
 struct SidebarView: View {
     @EnvironmentObject var appState: AppState
 
     var body: some View {
-        List {
-            Section("Projects") {
-                ForEach(appState.projects) { project in
-                    ProjectRow(project: project)
-                        .contentShape(Rectangle())
-                        .onTapGesture {
-                            appState.selectProject(project)
-                        }
-                        .listRowBackground(
-                            RoundedRectangle(cornerRadius: 6)
-                                .fill(appState.selectedProject?.id == project.id
-                                      ? Theme.orange.opacity(0.15)
-                                      : Color.clear)
-                        )
-                        .contextMenu {
-                            Button {
-                                appState.openProject(project)
-                            } label: {
-                                Label("Open in Finder", systemImage: "folder")
-                            }
+        VStack(alignment: .leading, spacing: 0) {
+            // Section header
+            Text("Projects")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(Theme.textTertiary)
+                .textCase(.uppercase)
+                .padding(.horizontal, 16)
+                .padding(.top, 12)
+                .padding(.bottom, 8)
 
-                            Divider()
-
-                            Button(role: .destructive) {
-                                appState.removeProject(project)
-                            } label: {
-                                Label("Remove Project", systemImage: "trash")
-                            }
+            if appState.projects.isEmpty {
+                EmptySidebarView()
+            } else {
+                ScrollView {
+                    VStack(spacing: 2) {
+                        ForEach(appState.projects) { project in
+                            ProjectRow(project: project)
                         }
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.bottom, 8)
                 }
             }
         }
-        .listStyle(.sidebar)
         .frame(minWidth: Theme.sidebarWidth)
-        .overlay {
-            if appState.projects.isEmpty {
-                EmptySidebarView()
-            }
-        }
+        .background(Theme.sidebarBackground)
     }
 }
 
-/// A single project row in the sidebar list.
+/// A single project row in the sidebar.
 struct ProjectRow: View {
     let project: Project
     @EnvironmentObject var appState: AppState
@@ -99,9 +86,33 @@ struct ProjectRow: View {
                 .transition(.opacity.animation(.easeInOut(duration: 0.15)))
             }
         }
-        .padding(.vertical, 2)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(
+            RoundedRectangle(cornerRadius: 6)
+                .fill(isSelected ? Theme.orange.opacity(0.15) : isHovered ? Theme.midGray.opacity(0.15) : Color.clear)
+        )
+        .contentShape(Rectangle())
+        .onTapGesture {
+            appState.selectProject(project)
+        }
         .onHover { hovering in
             isHovered = hovering
+        }
+        .contextMenu {
+            Button {
+                appState.openProject(project)
+            } label: {
+                Label("Open in Finder", systemImage: "folder")
+            }
+
+            Divider()
+
+            Button(role: .destructive) {
+                appState.removeProject(project)
+            } label: {
+                Label("Remove Project", systemImage: "trash")
+            }
         }
     }
 
@@ -153,6 +164,8 @@ struct EmptySidebarView: View {
 
     var body: some View {
         VStack(spacing: 16) {
+            Spacer()
+
             Image(systemName: "folder.badge.plus")
                 .font(.system(size: 32))
                 .foregroundStyle(Theme.textTertiary)
@@ -181,7 +194,10 @@ struct EmptySidebarView: View {
                 .clipShape(RoundedRectangle(cornerRadius: Theme.smallCornerRadius))
             }
             .buttonStyle(.plain)
+
+            Spacer()
         }
         .padding(24)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
