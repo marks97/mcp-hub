@@ -1,38 +1,40 @@
 import SwiftUI
 
 /// Sidebar listing all registered projects with selection and context menus.
+/// Uses manual selection with custom row backgrounds to avoid macOS blue accent.
 struct SidebarView: View {
     @EnvironmentObject var appState: AppState
 
     var body: some View {
-        List(selection: Binding(
-            get: { appState.selectedProject },
-            set: { project in
-                if let project {
-                    appState.selectProject(project)
-                }
-            }
-        )) {
+        List {
             Section("Projects") {
                 ForEach(appState.projects) { project in
-                    NavigationLink(value: project) {
-                        ProjectRow(project: project)
-                    }
-                    .contextMenu {
-                        Button {
-                            appState.openProject(project)
-                        } label: {
-                            Label("Open in Finder", systemImage: "folder")
+                    ProjectRow(project: project)
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            appState.selectProject(project)
                         }
+                        .listRowBackground(
+                            RoundedRectangle(cornerRadius: 6)
+                                .fill(appState.selectedProject?.id == project.id
+                                      ? Theme.orange.opacity(0.15)
+                                      : Color.clear)
+                        )
+                        .contextMenu {
+                            Button {
+                                appState.openProject(project)
+                            } label: {
+                                Label("Open in Finder", systemImage: "folder")
+                            }
 
-                        Divider()
+                            Divider()
 
-                        Button(role: .destructive) {
-                            appState.removeProject(project)
-                        } label: {
-                            Label("Remove Project", systemImage: "trash")
+                            Button(role: .destructive) {
+                                appState.removeProject(project)
+                            } label: {
+                                Label("Remove Project", systemImage: "trash")
+                            }
                         }
-                    }
                 }
             }
         }
@@ -68,7 +70,7 @@ struct ProjectRow: View {
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(project.name)
-                    .font(.system(size: 13, weight: .medium))
+                    .font(.system(size: 13, weight: isSelected ? .semibold : .medium))
                     .foregroundStyle(isSelected ? Theme.textPrimary : Theme.textSecondary)
                     .lineLimit(1)
 
@@ -98,7 +100,6 @@ struct ProjectRow: View {
             }
         }
         .padding(.vertical, 2)
-        .contentShape(Rectangle())
         .onHover { hovering in
             isHovered = hovering
         }
@@ -113,7 +114,7 @@ struct ProjectRow: View {
     }
 }
 
-/// Play/restart button for a project's Claude Desktop instance (isolation mode).
+/// Play/restart button for a project's Claude Desktop instance.
 struct ProjectPlayButton: View {
     @EnvironmentObject var appState: AppState
     let project: Project
