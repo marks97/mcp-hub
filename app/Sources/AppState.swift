@@ -166,13 +166,15 @@ class AppState: ObservableObject {
         loadServers(for: project)
     }
 
-    /// Creates the minimal .claude directory structure for a project.
+    /// Creates the .claude directory structure for a project, including
+    /// the env-injecting wrapper script so secrets from .env reach MCP servers.
     private func scaffoldClaudeStructure(at projectPath: String) {
         let fm = FileManager.default
         let claudeDir = "\(projectPath)/.claude"
 
         let dirs = [
             "\(claudeDir)/infra",
+            "\(claudeDir)/infra/scripts",
             "\(claudeDir)/agents",
             "\(claudeDir)/docs",
             "\(claudeDir)/rules",
@@ -183,6 +185,7 @@ class AppState: ObservableObject {
             try? fm.createDirectory(atPath: dir, withIntermediateDirectories: true)
         }
 
+        // .mcp.json
         let mcpPath = "\(claudeDir)/infra/.mcp.json"
         if !fm.fileExists(atPath: mcpPath) {
             let mcpJson: [String: Any] = ["mcpServers": [String: Any]()]
@@ -191,6 +194,47 @@ class AppState: ObservableObject {
             }
         }
 
+        // run-mcp.sh — sources .env, expands $VAR refs in args, then exec's
+        let runMcpPath = "\(claudeDir)/infra/scripts/run-mcp.sh"
+        if !fm.fileExists(atPath: runMcpPath) {
+            let script = [
+                "#!/bin/bash",
+                #"SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)""#,
+                #"ENV_FILE="$SCRIPT_DIR/../.env""#,
+                "",
+                #"if [ -f "$ENV_FILE" ]; then"#,
+                "  set -a",
+                #"  source "$ENV_FILE""#,
+                "  set +a",
+                "fi",
+                "",
+                "# Expand $VAR references in arguments",
+                "# Handles both env-var servers and CLI-flag servers",
+                "# e.g. --access-token $SENTRY_API_TOKEN",
+                "EXPANDED_ARGS=()",
+                #"for arg in "$@"; do"#,
+                #"  if [[ "$arg" == *'$'* ]]; then"#,
+                #"    EXPANDED_ARGS+=("$(eval printf '%s' "$arg")")"#,
+                "  else",
+                #"    EXPANDED_ARGS+=("$arg")"#,
+                "  fi",
+                "done",
+                "",
+                #"exec "${EXPANDED_ARGS[@]}""#,
+            ].joined(separator: "\n")
+            try? script.write(toFile: runMcpPath, atomically: true, encoding: .utf8)
+            var attrs = (try? fm.attributesOfItem(atPath: runMcpPath)) ?? [:]
+            attrs[.posixPermissions] = 0o755
+            try? fm.setAttributes(attrs, ofItemAtPath: runMcpPath)
+        }
+
+        // Empty .env for secrets
+        let envPath = "\(claudeDir)/infra/.env"
+        if !fm.fileExists(atPath: envPath) {
+            try? "".write(toFile: envPath, atomically: true, encoding: .utf8)
+        }
+
+        // CLAUDE.md
         let claudeMdPath = "\(claudeDir)/CLAUDE.md"
         if !fm.fileExists(atPath: claudeMdPath) {
             try? "".write(toFile: claudeMdPath, atomically: true, encoding: .utf8)
@@ -281,9 +325,16 @@ class AppState: ObservableObject {
     // MARK: - Server CRUD
 
     /// Adds a new MCP server to the current project's .mcp.json.
+    /// Routes the command through run-mcp.sh so .env secrets are injected.
     func addServer(name: String, config: MCPServerConfig) {
         guard let project = selectedProject else { return }
         let mcpPath = "\(project.path)/\(Config.mcpConfigPath)"
+
+        // Ensure run-mcp.sh exists (for projects added before this feature)
+        let runMcpPath = "\(project.path)/.claude/infra/scripts/run-mcp.sh"
+        if !FileManager.default.fileExists(atPath: runMcpPath) {
+            scaffoldClaudeStructure(at: project.path)
+        }
 
         var existing: [String: Any] = [:]
         if let data = try? Data(contentsOf: URL(fileURLWithPath: mcpPath)),
@@ -294,8 +345,15 @@ class AppState: ObservableObject {
         var mcpServers = existing["mcpServers"] as? [String: Any] ?? [:]
 
         var serverDict: [String: Any] = [:]
-        if let command = config.command { serverDict["command"] = command }
-        if let args = config.args { serverDict["args"] = args }
+
+        // Route through run-mcp.sh: the original command + args become
+        // args to the wrapper, so .env secrets get sourced before exec.
+        if let command = config.command {
+            serverDict["command"] = "./.claude/infra/scripts/run-mcp.sh"
+            var wrapperArgs = [command]
+            if let args = config.args { wrapperArgs.append(contentsOf: args) }
+            serverDict["args"] = wrapperArgs
+        }
         if let env = config.env, !env.isEmpty { serverDict["env"] = env }
 
         mcpServers[name] = serverDict
