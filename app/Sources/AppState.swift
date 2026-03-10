@@ -70,6 +70,7 @@ class AppState: ObservableObject {
         if let data = try? JSONEncoder().encode(settings) {
             UserDefaults.standard.set(data, forKey: Config.settingsKey)
         }
+        cleanupStaleWrappers()
     }
 
     // MARK: - Claude Polling
@@ -241,7 +242,7 @@ class AppState: ObservableObject {
         }
     }
 
-    /// Removes a project, terminates its Claude instance if running, and updates selection.
+    /// Removes a project, terminates its Claude instance if running, cleans up wrapper, and updates selection.
     func removeProject(_ project: Project) {
         // Terminate isolated instance if running
         if let info = projectInstances[project.id], let pid = info.pid, info.isRunning {
@@ -250,6 +251,11 @@ class AppState: ObservableObject {
             }
         }
         projectInstances.removeValue(forKey: project.id)
+
+        // Remove wrapper .app if it exists
+        let displayName = settings.isolationDisplayName(for: project.name)
+        let wrapperPath = "\(Self.wrappersDir)/\(displayName).app"
+        try? FileManager.default.removeItem(atPath: wrapperPath)
 
         projects.removeAll { $0.id == project.id }
         saveProjects()
@@ -792,13 +798,25 @@ class AppState: ObservableObject {
             guard let self else { return }
 
             if let pid = self.doLaunchClaude(for: project) {
+                // Poll until the Claude process is alive
+                var finalPid = pid
+                for _ in 0..<Config.launchPollAttempts {
+                    Thread.sleep(forTimeInterval: Config.pollStep)
+                    if kill(finalPid, 0) == 0 { break }
+                    // The wrapper may have re-exec'd — re-scan
+                    let settingsDir = self.claudeSettingsDir(for: project)
+                    if let newPid = self.findClaudePid(settingsDir: settingsDir) {
+                        finalPid = newPid
+                        break
+                    }
+                }
                 Thread.sleep(forTimeInterval: Config.processSettleDelay)
-                let running = kill(pid, 0) == 0
+                let running = kill(finalPid, 0) == 0
                 DispatchQueue.main.async {
                     self.projectInstances[project.id] = ProjectInstanceInfo(
                         isRunning: running,
                         isRestarting: false,
-                        pid: running ? pid : nil
+                        pid: running ? finalPid : nil
                     )
                 }
             } else {
@@ -835,13 +853,23 @@ class AppState: ObservableObject {
             Thread.sleep(forTimeInterval: 2.0)
 
             if let pid = self.doLaunchClaude(for: project) {
+                var finalPid = pid
+                for _ in 0..<Config.launchPollAttempts {
+                    Thread.sleep(forTimeInterval: Config.pollStep)
+                    if kill(finalPid, 0) == 0 { break }
+                    let settingsDir = self.claudeSettingsDir(for: project)
+                    if let newPid = self.findClaudePid(settingsDir: settingsDir) {
+                        finalPid = newPid
+                        break
+                    }
+                }
                 Thread.sleep(forTimeInterval: Config.processSettleDelay)
-                let running = kill(pid, 0) == 0
+                let running = kill(finalPid, 0) == 0
                 DispatchQueue.main.async {
                     self.projectInstances[project.id] = ProjectInstanceInfo(
                         isRunning: running,
                         isRestarting: false,
-                        pid: running ? pid : nil
+                        pid: running ? finalPid : nil
                     )
                 }
             } else {
@@ -853,23 +881,141 @@ class AppState: ObservableObject {
     }
 
     /// Launches a Claude Desktop instance isolated to the project's settings directory.
+    /// Creates a lightweight wrapper .app so the Dock shows a custom name.
     private func doLaunchClaude(for project: Project) -> Int32? {
         let settingsDir = claudeSettingsDir(for: project)
-
-        let claudePath = Bundle(path: "/Applications/Claude.app")?.executablePath
-            ?? "/Applications/Claude.app/Contents/MacOS/Claude"
+        let wrapperApp = buildWrapperApp(for: project, settingsDir: settingsDir)
 
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: claudePath)
-        process.arguments = ["--user-data-dir=\(settingsDir)"]
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+        process.arguments = ["-a", wrapperApp]
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
 
         do {
             try process.run()
-            return process.processIdentifier
+            process.waitUntilExit()
+
+            // Find the PID of the actual Claude process we just launched
+            Thread.sleep(forTimeInterval: 2.0)
+            return findClaudePid(settingsDir: settingsDir)
         } catch {
             return nil
+        }
+    }
+
+    /// Finds the PID of a Claude process running with the given --user-data-dir.
+    private func findClaudePid(settingsDir: String) -> Int32? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/ps")
+        process.arguments = ["-eo", "pid,args"]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+
+        do {
+            try process.run()
+            process.waitUntilExit()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            let output = String(data: data, encoding: .utf8) ?? ""
+
+            for line in output.components(separatedBy: .newlines) {
+                if line.contains("--user-data-dir=\(settingsDir)"), line.contains("Claude") {
+                    let trimmed = line.trimmingCharacters(in: .whitespaces)
+                    if let pidStr = trimmed.split(separator: " ").first,
+                       let pid = Int32(pidStr) {
+                        return pid
+                    }
+                }
+            }
+        } catch {}
+        return nil
+    }
+
+    // MARK: - Wrapper App Generation
+
+    /// Directory where wrapper .app bundles are stored.
+    private static var wrappersDir: String {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        return "\(home)/Applications/Claude Hub Wrappers"
+    }
+
+    /// Builds (or updates) a lightweight .app wrapper that launches Claude with
+    /// --user-data-dir and shows a custom name in the Dock.
+    private func buildWrapperApp(for project: Project, settingsDir: String) -> String {
+        let displayName = settings.isolationDisplayName(for: project.name)
+        let appDir = "\(Self.wrappersDir)/\(displayName).app"
+        let contentsDir = "\(appDir)/Contents"
+        let macosDir = "\(contentsDir)/MacOS"
+        let resourcesDir = "\(contentsDir)/Resources"
+        let fm = FileManager.default
+
+        try? fm.createDirectory(atPath: macosDir, withIntermediateDirectories: true)
+        try? fm.createDirectory(atPath: resourcesDir, withIntermediateDirectories: true)
+
+        // --- Info.plist ---
+        let bundleId = "com.claudehub.wrapper.\(project.name.lowercased().replacingOccurrences(of: " ", with: "-"))"
+        let plist: [String: Any] = [
+            "CFBundleName": displayName,
+            "CFBundleDisplayName": displayName,
+            "CFBundleIdentifier": bundleId,
+            "CFBundleExecutable": "launch",
+            "CFBundleIconFile": "AppIcon",
+            "CFBundlePackageType": "APPL",
+            "CFBundleVersion": "1.0",
+            "CFBundleShortVersionString": "1.0",
+            "LSUIElement": false,
+        ]
+        let plistPath = "\(contentsDir)/Info.plist"
+        (plist as NSDictionary).write(toFile: plistPath, atomically: true)
+
+        // --- Launcher script ---
+        let claudePath = Bundle(path: "/Applications/Claude.app")?.executablePath
+            ?? "/Applications/Claude.app/Contents/MacOS/Claude"
+        let launcherScript = """
+        #!/bin/bash
+        exec "\(claudePath)" "--user-data-dir=\(settingsDir)"
+        """
+        let launcherPath = "\(macosDir)/launch"
+        try? launcherScript.write(toFile: launcherPath, atomically: true, encoding: .utf8)
+        var attrs = (try? fm.attributesOfItem(atPath: launcherPath)) ?? [:]
+        attrs[.posixPermissions] = 0o755
+        try? fm.setAttributes(attrs, ofItemAtPath: launcherPath)
+
+        // --- Copy icon from Claude.app ---
+        let iconDest = "\(resourcesDir)/AppIcon.icns"
+        if !fm.fileExists(atPath: iconDest) {
+            // Try to find Claude's icon
+            let claudeIconCandidates = [
+                "/Applications/Claude.app/Contents/Resources/AppIcon.icns",
+                "/Applications/Claude.app/Contents/Resources/icon.icns",
+                "/Applications/Claude.app/Contents/Resources/electron.icns",
+            ]
+            for candidate in claudeIconCandidates {
+                if fm.fileExists(atPath: candidate) {
+                    try? fm.copyItem(atPath: candidate, toPath: iconDest)
+                    break
+                }
+            }
+        }
+
+        return appDir
+    }
+
+    /// Cleans up old wrapper apps that no longer match the current naming settings.
+    func cleanupStaleWrappers() {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: Self.wrappersDir) else { return }
+
+        // Build set of expected wrapper names
+        let expectedNames = Set(projects.map { settings.isolationDisplayName(for: $0.name) })
+
+        guard let contents = try? fm.contentsOfDirectory(atPath: Self.wrappersDir) else { return }
+        for item in contents where item.hasSuffix(".app") {
+            let name = String(item.dropLast(4)) // remove .app
+            if !expectedNames.contains(name) {
+                try? fm.removeItem(atPath: "\(Self.wrappersDir)/\(item)")
+            }
         }
     }
 

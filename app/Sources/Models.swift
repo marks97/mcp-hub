@@ -106,6 +106,16 @@ struct ProjectInstanceInfo {
 /// Persisted application settings.
 struct AppSettings: Codable {
     var registryURLs: [String] = ["https://registry.modelcontextprotocol.io/v0.1/servers"]
+    /// Text prepended to the project name in the Dock (e.g. "Claude - ").
+    var isolationPrefix: String = ""
+    /// Text appended to the project name in the Dock (e.g. " (Claude)").
+    var isolationSuffix: String = ""
+
+    /// Builds the display name shown in the Dock for an isolated instance.
+    func isolationDisplayName(for projectName: String) -> String {
+        let name = "\(isolationPrefix)\(projectName)\(isolationSuffix)"
+        return name.isEmpty ? projectName : name
+    }
 }
 
 // MARK: - MCP Registry API

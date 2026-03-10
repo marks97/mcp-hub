@@ -12,7 +12,7 @@ Claude Desktop uses one global MCP config. If you work on multiple projects with
 
 **Per-project MCP management** — Each project has its own servers, env vars (`.env`), and tool-level toggles. A gateway aggregates everything into a single endpoint for Claude Desktop. You can enable/disable individual tools, not just whole servers.
 
-**Per-project Claude Desktop isolation** — Run separate Claude Desktop instances per project using `--user-data-dir=~/claude-{project-name}`. Multiple projects can have Claude running simultaneously. Launch shared or isolated from the toolbar menu.
+**Per-project Claude Desktop isolation** — Run separate Claude Desktop instances per project. Multiple projects can have Claude running simultaneously. Each isolated instance appears in the Dock with its own name (just the project name by default — configurable prefix/suffix in Settings). Launch shared or isolated from the toolbar menu.
 
 **MCP Marketplace** — Browse the [official MCP registry](https://registry.modelcontextprotocol.io), search by category, and add servers with pre-filled commands. Supports npm, PyPI, and Docker packages.
 

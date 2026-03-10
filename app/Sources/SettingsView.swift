@@ -5,8 +5,53 @@ struct SettingsView: View {
     @EnvironmentObject var appState: AppState
     @State private var newRegistryURL = ""
 
+    private var previewName: String {
+        appState.settings.isolationDisplayName(for: "MyProject")
+    }
+
     var body: some View {
         Form {
+            // MARK: - Isolation Naming
+            Section {
+                HStack {
+                    Text("Prefix")
+                        .frame(width: 50, alignment: .leading)
+                    TextField("e.g. Claude - ", text: $appState.settings.isolationPrefix)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(size: 12, design: .monospaced))
+                        .onChange(of: appState.settings.isolationPrefix) { _, _ in
+                            appState.saveSettings()
+                        }
+                }
+
+                HStack {
+                    Text("Suffix")
+                        .frame(width: 50, alignment: .leading)
+                    TextField("e.g.  (Claude)", text: $appState.settings.isolationSuffix)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(size: 12, design: .monospaced))
+                        .onChange(of: appState.settings.isolationSuffix) { _, _ in
+                            appState.saveSettings()
+                        }
+                }
+
+                HStack(spacing: 4) {
+                    Text("Dock name:")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                    Text(previewName)
+                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(Theme.orange)
+                }
+            } header: {
+                Text("Isolated Instance Naming")
+            } footer: {
+                Text("Isolated Claude instances show as separate apps in the Dock. Configure how their names appear.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            }
+
+            // MARK: - Marketplace Sources
             Section {
                 ForEach(appState.settings.registryURLs, id: \.self) { url in
                     HStack {
@@ -45,7 +90,7 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 500, height: 240)
+        .frame(width: 500, height: 360)
     }
 
     private func addRegistryURL() {
