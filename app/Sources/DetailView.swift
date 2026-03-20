@@ -21,6 +21,8 @@ struct ProjectDetailView: View {
     @EnvironmentObject var appState: AppState
     @State private var showAddServer = false
     @State private var showMarketplace = false
+    @State private var showBadgePicker = false
+    @State private var avatarHovered = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -54,9 +56,23 @@ struct ProjectDetailView: View {
 
     private var projectHeader: some View {
         HStack(spacing: 12) {
-            Image(systemName: "folder.fill")
-                .font(.system(size: 20))
-                .foregroundStyle(Theme.orange)
+            ProjectAvatar(project: project, size: 36, isSelected: true)
+                .overlay(alignment: .bottomTrailing) {
+                    if avatarHovered {
+                        Image(systemName: "pencil.circle.fill")
+                            .font(.system(size: 14))
+                            .foregroundStyle(.white)
+                            .background(Circle().fill(Theme.orange).frame(width: 14, height: 14))
+                            .offset(x: 4, y: 4)
+                            .transition(.opacity.animation(.easeInOut(duration: 0.15)))
+                    }
+                }
+                .onHover { avatarHovered = $0 }
+                .onTapGesture { showBadgePicker = true }
+                .popover(isPresented: $showBadgePicker, arrowEdge: .bottom) {
+                    BadgeIconPicker(project: project, isPresented: $showBadgePicker)
+                        .environmentObject(appState)
+                }
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(project.name)

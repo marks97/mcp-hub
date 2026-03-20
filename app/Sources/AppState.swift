@@ -1,6 +1,9 @@
 import Foundation
 import Combine
 import AppKit
+import os.log
+
+private let logger = Logger(subsystem: "com.claudehub", category: "AppState")
 
 /// Central application state managing projects, MCP server configurations,
 /// and Claude Desktop lifecycle (global or per-project isolation).
@@ -40,6 +43,48 @@ class AppState: ObservableObject {
         static let processSettleDelay: TimeInterval = 5.0
         static let toolDiscoveryTimeout: TimeInterval = 15.0
     }
+
+    /// The run-mcp.sh script template. Resolves the user's login shell PATH
+    /// (GUI apps inherit a minimal PATH), sources .env, expands $VAR refs, then exec's.
+    static let runMcpScript: String = [
+        "#!/bin/bash",
+        "",
+        "# Resolve full user PATH (GUI apps have a minimal PATH)",
+        #"eval \"$(/bin/bash -ilc 'echo export PATH=\"$PATH\"' 2>/dev/null)\""#,
+        "",
+        #"SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)""#,
+        #"ENV_FILE="$SCRIPT_DIR/../.env""#,
+        "",
+        #"if [ -f "$ENV_FILE" ]; then"#,
+        "  set -a",
+        #"  source "$ENV_FILE""#,
+        "  set +a",
+        "fi",
+        "",
+        "# Expand $VAR references in arguments",
+        "EXPANDED_ARGS=()",
+        #"for arg in "$@"; do"#,
+        #"  if [[ "$arg" == *'$'* ]]; then"#,
+        #"    EXPANDED_ARGS+=("$(eval printf '%s' "$arg")")"#,
+        "  else",
+        #"    EXPANDED_ARGS+=("$arg")"#,
+        "  fi",
+        "done",
+        "",
+        "# Polyfill globalThis.crypto for Node environments where it's missing",
+        #"export NODE_OPTIONS=\"--require ${SCRIPT_DIR}/crypto-shim.cjs ${NODE_OPTIONS:-}\""#,
+        "",
+        #"exec "${EXPANDED_ARGS[@]}""#,
+    ].joined(separator: "\n")
+
+    /// Polyfill for globalThis.crypto, preloaded via NODE_OPTIONS --require.
+    static let cryptoShimScript = """
+    // Polyfill globalThis.crypto for environments where it's missing
+    if (typeof globalThis.crypto === 'undefined') {
+      const { webcrypto } = require('crypto');
+      globalThis.crypto = webcrypto;
+    }
+    """
 
     init() {
         self.gatewayPath = Self.findGatewayPath()
@@ -89,6 +134,21 @@ class AppState: ObservableObject {
 
             // Per-project isolated instance checks
             for (projectId, info) in self.projectInstances {
+                // Auto-clear stuck isRestarting after 30 seconds
+                if info.isRestarting,
+                   let since = info.restartingSince,
+                   Date().timeIntervalSince(since) > 30 {
+                    logger.warning("polling: force-clearing stuck isRestarting for \(projectId) after 30s")
+                    let settingsDir = self.projects.first(where: { $0.id == projectId })
+                        .map { self.claudeSettingsDir(for: $0) }
+                    let foundPid = settingsDir.flatMap { self.findClaudePid(settingsDir: $0) }
+                    let running = foundPid.map { kill($0, 0) == 0 } ?? false
+                    self.projectInstances[projectId] = ProjectInstanceInfo(
+                        isRunning: running,
+                        pid: foundPid
+                    )
+                    continue
+                }
                 guard !info.isRestarting, let pid = info.pid else { continue }
                 let running = kill(pid, 0) == 0
                 if running != info.isRunning {
@@ -131,6 +191,73 @@ class AppState: ObservableObject {
     func saveProjects() {
         if let data = try? JSONEncoder().encode(projects) {
             UserDefaults.standard.set(data, forKey: Config.userDefaultsKey)
+        }
+    }
+
+    // MARK: - Badge Icons
+
+    /// Directory for storing custom badge icon images.
+    static var badgeIconsDir: String {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let dir = "\(home)/Library/Application Support/ClaudeHub/BadgeIcons"
+        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
+    /// Saves a custom image and returns its filename.
+    func saveBadgeImage(_ image: NSImage) -> String? {
+        guard let tiff = image.tiffRepresentation,
+              let rep = NSBitmapImageRep(data: tiff),
+              let png = rep.representation(using: .png, properties: [:]) else { return nil }
+        let filename = "\(UUID().uuidString).png"
+        let path = "\(Self.badgeIconsDir)/\(filename)"
+        do {
+            try png.write(to: URL(fileURLWithPath: path))
+            return filename
+        } catch {
+            return nil
+        }
+    }
+
+    /// Loads a custom badge image by filename.
+    func loadBadgeImage(filename: String) -> NSImage? {
+        NSImage(contentsOfFile: "\(Self.badgeIconsDir)/\(filename)")
+    }
+
+    /// Removes a custom badge image file.
+    private func removeBadgeImage(filename: String) {
+        try? FileManager.default.removeItem(atPath: "\(Self.badgeIconsDir)/\(filename)")
+    }
+
+    /// Updates a project's badge and regenerates its wrapper icon.
+    func updateBadgeIcon(for project: Project, badge: BadgeIcon) {
+        // Clean up old custom image if switching away
+        if case .customImage(let oldFile) = project.badgeIcon, badge != project.badgeIcon {
+            removeBadgeImage(filename: oldFile)
+        }
+
+        guard let index = projects.firstIndex(where: { $0.id == project.id }) else { return }
+        projects[index].badgeIcon = badge
+        saveProjects()
+
+        // Regenerate wrapper icon if one exists
+        let displayName = settings.isolationDisplayName(for: projects[index].name)
+        let wrapperPath = "\(Self.wrappersDir)/\(displayName).app"
+        let fm = FileManager.default
+        if fm.fileExists(atPath: wrapperPath) {
+            let iconDest = "\(wrapperPath)/Contents/Resources/AppIcon.icns"
+            try? IconCompositor.generateIcon(
+                badge: badge,
+                outputPath: iconDest,
+                badgeImageLoader: { self.loadBadgeImage(filename: $0) }
+            )
+            // Touch Info.plist to invalidate Dock icon cache
+            let plistPath = "\(wrapperPath)/Contents/Info.plist"
+            try? fm.setAttributes([.modificationDate: Date()], ofItemAtPath: plistPath)
+        }
+
+        if selectedProject?.id == project.id {
+            selectedProject = projects[index]
         }
     }
 
@@ -195,39 +322,18 @@ class AppState: ObservableObject {
             }
         }
 
-        // run-mcp.sh — sources .env, expands $VAR refs in args, then exec's
+        // run-mcp.sh — resolves PATH, sources .env, expands $VAR refs, then exec's
         let runMcpPath = "\(claudeDir)/infra/scripts/run-mcp.sh"
-        if !fm.fileExists(atPath: runMcpPath) {
-            let script = [
-                "#!/bin/bash",
-                #"SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)""#,
-                #"ENV_FILE="$SCRIPT_DIR/../.env""#,
-                "",
-                #"if [ -f "$ENV_FILE" ]; then"#,
-                "  set -a",
-                #"  source "$ENV_FILE""#,
-                "  set +a",
-                "fi",
-                "",
-                "# Expand $VAR references in arguments",
-                "# Handles both env-var servers and CLI-flag servers",
-                "# e.g. --access-token $SENTRY_API_TOKEN",
-                "EXPANDED_ARGS=()",
-                #"for arg in "$@"; do"#,
-                #"  if [[ "$arg" == *'$'* ]]; then"#,
-                #"    EXPANDED_ARGS+=("$(eval printf '%s' "$arg")")"#,
-                "  else",
-                #"    EXPANDED_ARGS+=("$arg")"#,
-                "  fi",
-                "done",
-                "",
-                #"exec "${EXPANDED_ARGS[@]}""#,
-            ].joined(separator: "\n")
-            try? script.write(toFile: runMcpPath, atomically: true, encoding: .utf8)
-            var attrs = (try? fm.attributesOfItem(atPath: runMcpPath)) ?? [:]
-            attrs[.posixPermissions] = 0o755
-            try? fm.setAttributes(attrs, ofItemAtPath: runMcpPath)
-        }
+        let runMcpScript = Self.runMcpScript
+        // Always update to latest version of the script
+        try? runMcpScript.write(toFile: runMcpPath, atomically: true, encoding: .utf8)
+        var attrs = (try? fm.attributesOfItem(atPath: runMcpPath)) ?? [:]
+        attrs[.posixPermissions] = 0o755
+        try? fm.setAttributes(attrs, ofItemAtPath: runMcpPath)
+
+        // crypto-shim.cjs — polyfills globalThis.crypto for MCP servers
+        let shimPath = "\(claudeDir)/infra/scripts/crypto-shim.cjs"
+        try? Self.cryptoShimScript.write(toFile: shimPath, atomically: true, encoding: .utf8)
 
         // Empty .env for secrets
         let envPath = "\(claudeDir)/infra/.env"
@@ -251,6 +357,11 @@ class AppState: ObservableObject {
             }
         }
         projectInstances.removeValue(forKey: project.id)
+
+        // Clean up custom badge image if present
+        if case .customImage(let filename) = project.badgeIcon {
+            removeBadgeImage(filename: filename)
+        }
 
         // Remove wrapper .app if it exists
         let displayName = settings.isolationDisplayName(for: project.name)
@@ -445,16 +556,25 @@ class AppState: ObservableObject {
     // MARK: - Tool Discovery
 
     func discoverTools() {
-        guard let project = selectedProject else { return }
+        guard let project = selectedProject else {
+            logger.warning("discoverTools: no selectedProject")
+            return
+        }
+        logger.info("discoverTools: starting for \(project.name) with \(self.servers.count) servers")
         isDiscovering = true
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
 
             for server in self.servers {
-                guard server.enabled else { continue }
+                guard server.enabled else {
+                    logger.info("discoverTools: skipping disabled server \(server.name)")
+                    continue
+                }
 
+                logger.info("discoverTools: discovering tools for \(server.name)")
                 let tools = self.discoverToolsForServer(server, projectPath: project.path)
+                logger.info("discoverTools: \(server.name) returned \(tools.count) tools")
                 DispatchQueue.main.async {
                     let existingEnabled = Set(server.tools.filter(\.enabled).map(\.name))
                     server.tools = tools.map { tool in
@@ -476,6 +596,7 @@ class AppState: ObservableObject {
 
     private func discoverToolsForServer(_ server: ServerState, projectPath: String) -> [DiscoveredTool] {
         let command = resolveCommand(server.command, projectPath: projectPath)
+        logger.info("discoverToolsForServer: \(server.name) command=\(command) args=\(server.args)")
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: command)
@@ -483,6 +604,7 @@ class AppState: ObservableObject {
         process.currentDirectoryURL = URL(fileURLWithPath: projectPath)
 
         var env = ProcessInfo.processInfo.environment
+        env["PATH"] = Self.userShellPATH
         for (k, v) in server.env { env[k] = v }
         loadEnvFile(into: &env, projectPath: projectPath)
         process.environment = env
@@ -497,6 +619,7 @@ class AppState: ObservableObject {
 
         do {
             try process.run()
+            logger.info("discoverToolsForServer: \(server.name) process started, sending JSON-RPC")
 
             stdin.fileHandleForWriting.write(jsonrpc.data(using: .utf8)!)
             stdin.fileHandleForWriting.closeFile()
@@ -511,20 +634,51 @@ class AppState: ObservableObject {
 
             let timer = DispatchSource.makeTimerSource()
             timer.schedule(deadline: .now() + Config.toolDiscoveryTimeout)
-            timer.setEventHandler { process.terminate() }
+            timer.setEventHandler {
+                logger.warning("discoverToolsForServer: \(server.name) TIMEOUT, terminating")
+                process.terminate()
+            }
             timer.resume()
 
             process.waitUntilExit()
             timer.cancel()
+            logger.info("discoverToolsForServer: \(server.name) process exited with status \(process.terminationStatus)")
 
             readGroup.wait()
 
             let output = String(data: stdoutData, encoding: .utf8) ?? ""
-            return parseToolsFromOutput(output)
+            logger.info("discoverToolsForServer: \(server.name) output length=\(output.count)")
+            let tools = parseToolsFromOutput(output)
+            logger.info("discoverToolsForServer: \(server.name) parsed \(tools.count) tools")
+            return tools
         } catch {
+            logger.error("discoverToolsForServer: \(server.name) failed to start: \(error.localizedDescription)")
             return []
         }
     }
+
+    /// The user's full shell PATH, resolved once by sourcing their login shell profile.
+    private static let userShellPATH: String = {
+        let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: shell)
+        process.arguments = ["-ilc", "echo $PATH"]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        process.standardInput = FileHandle.nullDevice
+        do {
+            try process.run()
+            process.waitUntilExit()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            let path = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !path.isEmpty {
+                logger.info("resolveCommand: resolved user PATH (\(path.components(separatedBy: ":").count) entries)")
+                return path
+            }
+        } catch {}
+        return ProcessInfo.processInfo.environment["PATH"] ?? "/usr/bin:/bin"
+    }()
 
     private func resolveCommand(_ command: String, projectPath: String) -> String {
         if command.hasPrefix("./") {
@@ -533,9 +687,13 @@ class AppState: ObservableObject {
         if command.hasPrefix("/") {
             return command
         }
+        // Use the user's full shell PATH to find commands (GUI apps have a minimal PATH)
         let which = Process()
-        which.executableURL = URL(fileURLWithPath: "/usr/bin/which")
-        which.arguments = [command]
+        which.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        which.arguments = ["which", command]
+        var env = ProcessInfo.processInfo.environment
+        env["PATH"] = Self.userShellPATH
+        which.environment = env
         let pipe = Pipe()
         which.standardOutput = pipe
         which.standardError = Pipe()
@@ -544,10 +702,12 @@ class AppState: ObservableObject {
             which.waitUntilExit()
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
             let resolved = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            return resolved.isEmpty ? command : resolved
-        } catch {
-            return command
-        }
+            if !resolved.isEmpty {
+                return resolved
+            }
+        } catch {}
+        logger.warning("resolveCommand: could not resolve '\(command)' in user PATH")
+        return command
     }
 
     private func loadEnvFile(into env: inout [String: String], projectPath: String) {
@@ -792,37 +952,50 @@ class AppState: ObservableObject {
         }
         writeClaudeDesktopConfig(for: project)
 
-        projectInstances[project.id] = ProjectInstanceInfo(isRestarting: true)
+        // Track that a launch is in progress to prevent double-clicks.
+        logger.info("launchClaudeForProject: starting for \(project.name)")
+        projectInstances[project.id] = ProjectInstanceInfo(isRestarting: true, restartingSince: Date())
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let self else { return }
+            guard let self else {
+                logger.warning("launchClaudeForProject: self deallocated")
+                return
+            }
 
-            if let pid = self.doLaunchClaude(for: project) {
-                // Poll until the Claude process is alive
-                var finalPid = pid
-                for _ in 0..<Config.launchPollAttempts {
-                    Thread.sleep(forTimeInterval: Config.pollStep)
-                    if kill(finalPid, 0) == 0 { break }
-                    // The wrapper may have re-exec'd — re-scan
-                    let settingsDir = self.claudeSettingsDir(for: project)
-                    if let newPid = self.findClaudePid(settingsDir: settingsDir) {
-                        finalPid = newPid
-                        break
-                    }
+            logger.info("launchClaudeForProject: calling doLaunchClaude")
+            let pid = self.doLaunchClaude(for: project)
+            logger.info("launchClaudeForProject: doLaunchClaude returned pid=\(pid.map { String($0) } ?? "nil")")
+
+            DispatchQueue.main.async {
+                logger.info("launchClaudeForProject: clearing isRestarting on main thread")
+                self.projectInstances[project.id] = ProjectInstanceInfo(
+                    isRunning: false,
+                    isRestarting: false,
+                    pid: pid
+                )
+            }
+
+            guard let pid else { return }
+
+            // Poll in the background to confirm it's running
+            var finalPid = pid
+            for _ in 0..<Config.launchPollAttempts {
+                Thread.sleep(forTimeInterval: Config.pollStep)
+                if kill(finalPid, 0) == 0 { break }
+                let settingsDir = self.claudeSettingsDir(for: project)
+                if let newPid = self.findClaudePid(settingsDir: settingsDir) {
+                    finalPid = newPid
+                    break
                 }
-                Thread.sleep(forTimeInterval: Config.processSettleDelay)
-                let running = kill(finalPid, 0) == 0
-                DispatchQueue.main.async {
-                    self.projectInstances[project.id] = ProjectInstanceInfo(
-                        isRunning: running,
-                        isRestarting: false,
-                        pid: running ? finalPid : nil
-                    )
-                }
-            } else {
-                DispatchQueue.main.async {
-                    self.projectInstances[project.id] = ProjectInstanceInfo()
-                }
+            }
+            Thread.sleep(forTimeInterval: Config.processSettleDelay)
+            let running = kill(finalPid, 0) == 0
+            DispatchQueue.main.async {
+                self.projectInstances[project.id] = ProjectInstanceInfo(
+                    isRunning: running,
+                    isRestarting: false,
+                    pid: running ? finalPid : nil
+                )
             }
         }
     }
@@ -840,6 +1013,7 @@ class AppState: ObservableObject {
         projectInstances[project.id] = ProjectInstanceInfo(
             isRunning: info.isRunning,
             isRestarting: true,
+            restartingSince: Date(),
             pid: info.pid
         )
 
@@ -852,30 +1026,37 @@ class AppState: ObservableObject {
 
             Thread.sleep(forTimeInterval: 2.0)
 
-            if let pid = self.doLaunchClaude(for: project) {
-                var finalPid = pid
-                for _ in 0..<Config.launchPollAttempts {
-                    Thread.sleep(forTimeInterval: Config.pollStep)
-                    if kill(finalPid, 0) == 0 { break }
-                    let settingsDir = self.claudeSettingsDir(for: project)
-                    if let newPid = self.findClaudePid(settingsDir: settingsDir) {
-                        finalPid = newPid
-                        break
-                    }
+            let pid = self.doLaunchClaude(for: project)
+
+            // Clear the spinner immediately
+            DispatchQueue.main.async {
+                self.projectInstances[project.id] = ProjectInstanceInfo(
+                    isRunning: false,
+                    isRestarting: false,
+                    pid: pid
+                )
+            }
+
+            guard let pid else { return }
+
+            var finalPid = pid
+            for _ in 0..<Config.launchPollAttempts {
+                Thread.sleep(forTimeInterval: Config.pollStep)
+                if kill(finalPid, 0) == 0 { break }
+                let settingsDir = self.claudeSettingsDir(for: project)
+                if let newPid = self.findClaudePid(settingsDir: settingsDir) {
+                    finalPid = newPid
+                    break
                 }
-                Thread.sleep(forTimeInterval: Config.processSettleDelay)
-                let running = kill(finalPid, 0) == 0
-                DispatchQueue.main.async {
-                    self.projectInstances[project.id] = ProjectInstanceInfo(
-                        isRunning: running,
-                        isRestarting: false,
-                        pid: running ? finalPid : nil
-                    )
-                }
-            } else {
-                DispatchQueue.main.async {
-                    self.projectInstances[project.id] = ProjectInstanceInfo()
-                }
+            }
+            Thread.sleep(forTimeInterval: Config.processSettleDelay)
+            let running = kill(finalPid, 0) == 0
+            DispatchQueue.main.async {
+                self.projectInstances[project.id] = ProjectInstanceInfo(
+                    isRunning: running,
+                    isRestarting: false,
+                    pid: running ? finalPid : nil
+                )
             }
         }
     }
@@ -884,7 +1065,10 @@ class AppState: ObservableObject {
     /// Creates a lightweight wrapper .app so the Dock shows a custom name.
     private func doLaunchClaude(for project: Project) -> Int32? {
         let settingsDir = claudeSettingsDir(for: project)
+        logger.info("doLaunchClaude: settingsDir=\(settingsDir)")
+        logger.info("doLaunchClaude: building wrapper app")
         let wrapperApp = buildWrapperApp(for: project, settingsDir: settingsDir)
+        logger.info("doLaunchClaude: wrapperApp=\(wrapperApp)")
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
@@ -894,12 +1078,16 @@ class AppState: ObservableObject {
 
         do {
             try process.run()
+            logger.info("doLaunchClaude: open started, waiting for exit")
             process.waitUntilExit()
+            logger.info("doLaunchClaude: open exited with status \(process.terminationStatus)")
 
-            // Find the PID of the actual Claude process we just launched
             Thread.sleep(forTimeInterval: 2.0)
-            return findClaudePid(settingsDir: settingsDir)
+            let pid = findClaudePid(settingsDir: settingsDir)
+            logger.info("doLaunchClaude: findClaudePid returned \(pid.map { String($0) } ?? "nil")")
+            return pid
         } catch {
+            logger.error("doLaunchClaude: failed to run open: \(error.localizedDescription)")
             return nil
         }
     }
@@ -915,19 +1103,39 @@ class AppState: ObservableObject {
 
         do {
             try process.run()
+
+            // Read pipe data concurrently to avoid deadlock when output exceeds pipe buffer
+            var data = Data()
+            let readGroup = DispatchGroup()
+            readGroup.enter()
+            DispatchQueue.global(qos: .utility).async {
+                data = pipe.fileHandleForReading.readDataToEndOfFile()
+                readGroup.leave()
+            }
+
             process.waitUntilExit()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            readGroup.wait()
+
             let output = String(data: data, encoding: .utf8) ?? ""
 
+            // Match the main Claude process (--user-data-dir) or its crashpad handler
+            // (--database=settingsDir/Crashpad). Prefer the main process.
+            var mainPid: Int32?
+            var crashpadPid: Int32?
             for line in output.components(separatedBy: .newlines) {
-                if line.contains("--user-data-dir=\(settingsDir)"), line.contains("Claude") {
-                    let trimmed = line.trimmingCharacters(in: .whitespaces)
-                    if let pidStr = trimmed.split(separator: " ").first,
-                       let pid = Int32(pidStr) {
-                        return pid
-                    }
+                guard line.contains("Claude"), line.contains(settingsDir) else { continue }
+                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                guard let pidStr = trimmed.split(separator: " ").first,
+                      let pid = Int32(pidStr) else { continue }
+                if line.contains("--user-data-dir=\(settingsDir)") {
+                    mainPid = pid
+                    break
+                }
+                if crashpadPid == nil, line.contains("--database=\(settingsDir)") {
+                    crashpadPid = pid
                 }
             }
+            if let pid = mainPid ?? crashpadPid { return pid }
         } catch {}
         return nil
     }
@@ -943,6 +1151,7 @@ class AppState: ObservableObject {
     /// Builds (or updates) a lightweight .app wrapper that launches Claude with
     /// --user-data-dir and shows a custom name in the Dock.
     private func buildWrapperApp(for project: Project, settingsDir: String) -> String {
+        logger.info("buildWrapperApp: START for \(project.name)")
         let displayName = settings.isolationDisplayName(for: project.name)
         let appDir = "\(Self.wrappersDir)/\(displayName).app"
         let contentsDir = "\(appDir)/Contents"
@@ -959,37 +1168,82 @@ class AppState: ObservableObject {
             "CFBundleName": displayName,
             "CFBundleDisplayName": displayName,
             "CFBundleIdentifier": bundleId,
-            "CFBundleExecutable": "launch",
+            "CFBundleExecutable": "Claude",
             "CFBundleIconFile": "AppIcon",
             "CFBundlePackageType": "APPL",
-            "CFBundleVersion": "1.0",
+            "CFBundleVersion": "\(Int(Date().timeIntervalSince1970))",
             "CFBundleShortVersionString": "1.0",
             "LSUIElement": false,
         ]
         let plistPath = "\(contentsDir)/Info.plist"
         (plist as NSDictionary).write(toFile: plistPath, atomically: true)
 
-        // --- Launcher script ---
-        let claudePath = Bundle(path: "/Applications/Claude.app")?.executablePath
-            ?? "/Applications/Claude.app/Contents/MacOS/Claude"
-        let launcherScript = """
-        #!/bin/bash
-        exec "\(claudePath)" "--user-data-dir=\(settingsDir)"
-        """
-        let launcherPath = "\(macosDir)/launch"
-        try? launcherScript.write(toFile: launcherPath, atomically: true, encoding: .utf8)
-        var attrs = (try? fm.attributesOfItem(atPath: launcherPath)) ?? [:]
-        attrs[.posixPermissions] = 0o755
-        try? fm.setAttributes(attrs, ofItemAtPath: launcherPath)
+        // --- Tiny compiled launcher that exec's Claude with --user-data-dir ---
+        // We compile a small C program that calls execv() on the real Claude binary.
+        // Unlike a bash script, this exec's instantly and the resulting process inherits
+        // Claude.app's code signature (macOS validates the binary loaded into memory,
+        // not the original file). Unlike symlinks, this lets us bake in the argument.
+        let claudeApp = "/Applications/Claude.app"
+        let claudeContents = "\(claudeApp)/Contents"
+        let claudePath = Bundle(path: claudeApp)?.executablePath
+            ?? "\(claudeContents)/MacOS/Claude"
 
-        // --- Copy icon from Claude.app ---
+        let launcherSrc = """
+        #include <unistd.h>
+        int main(int argc, char *argv[]) {
+            char *args[] = {"\(claudePath)", "--user-data-dir=\(settingsDir)", 0};
+            return execv("\(claudePath)", args);
+        }
+        """
+        let srcPath = "\(macosDir)/launcher.c"
+        let binPath = "\(macosDir)/Claude"
+        try? fm.removeItem(atPath: "\(macosDir)/launch") // cleanup old bash launcher
+        try? launcherSrc.write(toFile: srcPath, atomically: true, encoding: .utf8)
+
+        // Compile the tiny launcher (only if source changed or binary missing)
+        let needsCompile: Bool
+        if fm.fileExists(atPath: binPath),
+           let srcDate = (try? fm.attributesOfItem(atPath: srcPath))?[.modificationDate] as? Date,
+           let binDate = (try? fm.attributesOfItem(atPath: binPath))?[.modificationDate] as? Date,
+           binDate > srcDate {
+            needsCompile = false
+        } else {
+            needsCompile = true
+        }
+        logger.info("buildWrapperApp: needsCompile=\(needsCompile)")
+        if needsCompile {
+            try? fm.removeItem(atPath: binPath)
+            let cc = Process()
+            cc.executableURL = URL(fileURLWithPath: "/usr/bin/cc")
+            cc.arguments = ["-O2", "-o", binPath, srcPath]
+            cc.standardOutput = FileHandle.nullDevice
+            cc.standardError = FileHandle.nullDevice
+            if (try? cc.run()) != nil {
+                cc.waitUntilExit()
+                logger.info("buildWrapperApp: cc exited with status \(cc.terminationStatus)")
+            } else {
+                logger.error("buildWrapperApp: cc failed to start")
+            }
+        }
+        // Keep source file so needsCompile check works on next launch
+
+        // --- Generate icon (with optional badge) ---
+        logger.info("buildWrapperApp: generating icon")
         let iconDest = "\(resourcesDir)/AppIcon.icns"
-        if !fm.fileExists(atPath: iconDest) {
-            // Try to find Claude's icon
+        try? fm.removeItem(atPath: iconDest)
+        do {
+            try IconCompositor.generateIcon(
+                badge: project.badgeIcon,
+                outputPath: iconDest,
+                badgeImageLoader: { self.loadBadgeImage(filename: $0) }
+            )
+            logger.info("buildWrapperApp: icon generated OK")
+        } catch {
+            logger.error("buildWrapperApp: icon generation failed: \(error.localizedDescription)")
             let claudeIconCandidates = [
-                "/Applications/Claude.app/Contents/Resources/AppIcon.icns",
-                "/Applications/Claude.app/Contents/Resources/icon.icns",
-                "/Applications/Claude.app/Contents/Resources/electron.icns",
+                "\(claudeContents)/Resources/AppIcon.icns",
+                "\(claudeContents)/Resources/icon.icns",
+                "\(claudeContents)/Resources/electron.icns",
             ]
             for candidate in claudeIconCandidates {
                 if fm.fileExists(atPath: candidate) {
@@ -999,6 +1253,7 @@ class AppState: ObservableObject {
             }
         }
 
+        logger.info("buildWrapperApp: DONE, returning \(appDir)")
         return appDir
     }
 

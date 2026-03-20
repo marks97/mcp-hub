@@ -40,6 +40,7 @@ struct ProjectRow: View {
     let project: Project
     @EnvironmentObject var appState: AppState
     @State private var isHovered = false
+    @State private var showBadgePicker = false
 
     private var isSelected: Bool {
         appState.selectedProject?.id == project.id
@@ -51,9 +52,18 @@ struct ProjectRow: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            Image(systemName: "folder.fill")
-                .foregroundStyle(isSelected ? Theme.orange : Theme.textTertiary)
-                .font(.system(size: 14))
+            ProjectAvatar(project: project, size: 24, isSelected: isSelected)
+                .overlay(alignment: .bottomTrailing) {
+                    if isHovered {
+                        Image(systemName: "pencil.circle.fill")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.white)
+                            .background(Circle().fill(Theme.orange).frame(width: 10, height: 10))
+                            .offset(x: 3, y: 3)
+                            .transition(.opacity.animation(.easeInOut(duration: 0.15)))
+                    }
+                }
+                .onTapGesture { showBadgePicker = true }
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(project.name)
@@ -106,6 +116,12 @@ struct ProjectRow: View {
                 Label("Open in Finder", systemImage: "folder")
             }
 
+            Button {
+                showBadgePicker = true
+            } label: {
+                Label("Badge Icon...", systemImage: "app.badge")
+            }
+
             Divider()
 
             Button(role: .destructive) {
@@ -113,6 +129,10 @@ struct ProjectRow: View {
             } label: {
                 Label("Remove Project", systemImage: "trash")
             }
+        }
+        .popover(isPresented: $showBadgePicker, arrowEdge: .trailing) {
+            BadgeIconPicker(project: project, isPresented: $showBadgePicker)
+                .environmentObject(appState)
         }
     }
 
@@ -199,5 +219,48 @@ struct EmptySidebarView: View {
         }
         .padding(24)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+/// Auto-generated avatar for a project: shows badge icon, custom image, or a letter initial.
+struct ProjectAvatar: View {
+    let project: Project
+    let size: CGFloat
+    var isSelected: Bool = false
+
+    @EnvironmentObject var appState: AppState
+
+    var body: some View {
+        Group {
+            switch project.badgeIcon {
+            case .sfSymbol(let name):
+                Image(systemName: name)
+                    .font(.system(size: size * 0.5, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: size, height: size)
+                    .background(Circle().fill(isSelected ? Theme.orange : Theme.textSecondary))
+            case .customImage(let filename):
+                if let img = appState.loadBadgeImage(filename: filename) {
+                    Image(nsImage: img)
+                        .resizable()
+                        .aspectRatio(contentMode: .fill)
+                        .frame(width: size, height: size)
+                        .clipShape(Circle())
+                } else {
+                    letterAvatar
+                }
+            case .none:
+                letterAvatar
+            }
+        }
+    }
+
+    private var letterAvatar: some View {
+        let letter = String(project.name.prefix(1)).uppercased()
+        return Text(letter)
+            .font(.system(size: size * 0.5, weight: .bold, design: .rounded))
+            .foregroundStyle(.white)
+            .frame(width: size, height: size)
+            .background(Circle().fill(isSelected ? Theme.orange : Theme.textSecondary))
     }
 }

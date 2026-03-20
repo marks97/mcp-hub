@@ -1,10 +1,64 @@
 import Foundation
 
+// MARK: - Badge Icon
+
+/// Badge overlay for a project's Dock icon.
+enum BadgeIcon: Codable, Hashable {
+    case none
+    case sfSymbol(String)
+    case customImage(String) // filename in app support directory
+
+    private enum CodingKeys: String, CodingKey {
+        case type, value
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let type = try container.decode(String.self, forKey: .type)
+        switch type {
+        case "sfSymbol":
+            self = .sfSymbol(try container.decode(String.self, forKey: .value))
+        case "customImage":
+            self = .customImage(try container.decode(String.self, forKey: .value))
+        default:
+            self = .none
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        switch self {
+        case .none:
+            try container.encode("none", forKey: .type)
+        case .sfSymbol(let name):
+            try container.encode("sfSymbol", forKey: .type)
+            try container.encode(name, forKey: .value)
+        case .customImage(let filename):
+            try container.encode("customImage", forKey: .type)
+            try container.encode(filename, forKey: .value)
+        }
+    }
+}
+
 /// A project directory that contains MCP server configurations.
 struct Project: Identifiable, Codable, Hashable {
     var id: String { path }
     let name: String
     let path: String
+    var badgeIcon: BadgeIcon
+
+    init(name: String, path: String, badgeIcon: BadgeIcon = .none) {
+        self.name = name
+        self.path = path
+        self.badgeIcon = badgeIcon
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        name = try container.decode(String.self, forKey: .name)
+        path = try container.decode(String.self, forKey: .path)
+        badgeIcon = try container.decodeIfPresent(BadgeIcon.self, forKey: .badgeIcon) ?? .none
+    }
 }
 
 /// Configuration for a single MCP server as read from .mcp.json.
@@ -98,6 +152,7 @@ class ServerState: ObservableObject, Identifiable {
 struct ProjectInstanceInfo {
     var isRunning: Bool = false
     var isRestarting: Bool = false
+    var restartingSince: Date? = nil
     var pid: Int32? = nil
 }
 
