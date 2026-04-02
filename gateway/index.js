@@ -24,6 +24,13 @@ const config = JSON.parse(readFileSync(resolvedConfigPath, "utf-8"));
 // Derive project root from config path (always at .claude/infra/gateway.config.json)
 const projectRoot = resolve(dirname(resolvedConfigPath), "../..");
 
+// Ensure node's bin directory is in PATH for upstream processes
+// (GUI apps like Claude Desktop launch us with minimal PATH)
+const nodeBin = dirname(process.execPath);
+if (!process.env.PATH?.includes(nodeBin)) {
+  process.env.PATH = `${nodeBin}:${process.env.PATH || ""}`;
+}
+
 const allTools = [];
 const toolToUpstream = new Map();
 const upstreamClients = new Map();

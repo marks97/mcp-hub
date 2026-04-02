@@ -27,6 +27,7 @@ class AppState: ObservableObject {
 
     private let gatewayPath: String
     private var claudePollingTimer: Timer?
+    private var lastDesktopConfigWriteDate: Date?
 
     private enum Config {
         static let claudeBundleId = "com.anthropic.claudefordesktop"
@@ -50,7 +51,7 @@ class AppState: ObservableObject {
         "#!/bin/bash",
         "",
         "# Resolve full user PATH (GUI apps have a minimal PATH)",
-        #"eval \"$(/bin/bash -ilc 'echo export PATH=\"$PATH\"' 2>/dev/null)\""#,
+        #"eval \"$(/bin/zsh -ilc 'printf \"export PATH=\\\"%s\\\"\" \"$PATH\"' 2>/dev/null)\""#,
         "",
         #"SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)""#,
         #"ENV_FILE="$SCRIPT_DIR/../.env""#,
@@ -158,6 +159,15 @@ class AppState: ObservableObject {
                         pid: running ? pid : nil
                     )
                 }
+            }
+
+            // Sync MCP servers and tool states with Claude Desktop
+            if let project = self.selectedProject {
+                self.syncFromDesktopConfig(for: project)
+
+                // Ensure tools in session files are enabled
+                // (catches newly created sessions where tools default to disabled)
+                self.enableAllToolsInSessions(settingsDir: self.claudeSettingsDir(for: project))
             }
         }
     }
@@ -383,6 +393,10 @@ class AppState: ObservableObject {
     func selectProject(_ project: Project) {
         selectedProject = project
         loadServers(for: project)
+
+        // Ensure desktop config has our servers, then initialize sync state
+        writeDesktopConfig(for: project)
+        syncFromDesktopConfig(for: project)
     }
 
     // MARK: - Server Configuration
@@ -804,6 +818,195 @@ class AppState: ObservableObject {
             try? data.write(to: URL(fileURLWithPath: mcpJsonPath))
         }
 
+        // Sync to Claude Desktop's config
+        writeDesktopConfig(for: project)
+    }
+
+    // MARK: - Claude Desktop Config Sync
+
+    /// Writes enabled MCP servers to claude_desktop_config.json in the project's
+    /// isolated user-data-dir, preserving existing preferences and other keys.
+    private func writeDesktopConfig(for project: Project) {
+        let settingsDir = claudeSettingsDir(for: project)
+        let configPath = "\(settingsDir)/claude_desktop_config.json"
+        let projectPath = project.path.hasSuffix("/") ? String(project.path.dropLast()) : project.path
+        let gatewayConfigPath = "\(projectPath)/\(Config.gatewayConfigPath)"
+        let nodeCommand = resolveCommand("node", projectPath: projectPath)
+
+        // Read existing file to preserve preferences and other keys
+        var existing: [String: Any] = [:]
+        if let data = try? Data(contentsOf: URL(fileURLWithPath: configPath)),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            existing = json
+        }
+
+        // Build mcpServers dict with enabled servers only
+        var mcpServers: [String: Any] = [:]
+
+        // Preserve any non-gateway servers already in the file
+        if let currentServers = existing["mcpServers"] as? [String: Any] {
+            for (name, config) in currentServers {
+                if let serverDict = config as? [String: Any],
+                   let env = serverDict["env"] as? [String: String],
+                   env["MCP_GATEWAY_SERVER"] != nil {
+                    // Gateway-managed — will be rebuilt below
+                    continue
+                }
+                // Non-gateway server — preserve it
+                mcpServers[name] = config
+            }
+        }
+
+        // Add enabled gateway servers
+        for server in servers where server.enabled {
+            mcpServers[server.name] = [
+                "command": nodeCommand,
+                "args": ["\(gatewayPath)/index.js"],
+                "env": [
+                    "MCP_GATEWAY_CONFIG": gatewayConfigPath,
+                    "MCP_GATEWAY_SERVER": server.name
+                ]
+            ] as [String: Any]
+        }
+
+        existing["mcpServers"] = mcpServers
+
+        // Write back
+        try? FileManager.default.createDirectory(
+            atPath: settingsDir,
+            withIntermediateDirectories: true
+        )
+
+        if let data = try? JSONSerialization.data(
+            withJSONObject: existing,
+            options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+        ) {
+            try? data.write(to: URL(fileURLWithPath: configPath))
+        }
+
+        // Record our write timestamp to avoid treating it as an external change
+        if let attrs = try? FileManager.default.attributesOfItem(atPath: configPath),
+           let modDate = attrs[.modificationDate] as? Date {
+            lastDesktopConfigWriteDate = modDate
+        }
+
+        // Enable all disabled tools in session files. The gateway handles
+        // per-tool filtering, so we just need everything enabled at the
+        // Claude Desktop level to avoid "disabled in connector settings".
+        enableAllToolsInSessions(settingsDir: settingsDir)
+    }
+
+    /// Sets all disabled MCP tools to enabled in Claude Desktop session files.
+    /// The gateway's tool filter handles which tools are actually exposed.
+    private func enableAllToolsInSessions(settingsDir: String) {
+        let sessionsBase = "\(settingsDir)/claude-code-sessions"
+        guard let orgDirs = try? FileManager.default.contentsOfDirectory(atPath: sessionsBase) else { return }
+
+        for orgDir in orgDirs {
+            let orgPath = "\(sessionsBase)/\(orgDir)"
+            guard let accountDirs = try? FileManager.default.contentsOfDirectory(atPath: orgPath) else { continue }
+            for accountDir in accountDirs {
+                let accountPath = "\(orgPath)/\(accountDir)"
+                guard let files = try? FileManager.default.contentsOfDirectory(atPath: accountPath) else { continue }
+                for file in files where file.hasPrefix("local_") && file.hasSuffix(".json") {
+                    let filePath = "\(accountPath)/\(file)"
+                    guard let data = try? Data(contentsOf: URL(fileURLWithPath: filePath)),
+                          var json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                          var tools = json["enabledMcpTools"] as? [String: Bool] else { continue }
+
+                    var changed = false
+                    for (toolName, enabled) in tools where !enabled {
+                        tools[toolName] = true
+                        changed = true
+                    }
+
+                    if changed {
+                        json["enabledMcpTools"] = tools
+                        if let newData = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]) {
+                            try? newData.write(to: URL(fileURLWithPath: filePath))
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Detects external changes to claude_desktop_config.json (e.g. user toggling
+    /// servers in Claude Desktop UI) and syncs them back to gateway.config.json.
+    private func syncFromDesktopConfig(for project: Project) {
+        let settingsDir = claudeSettingsDir(for: project)
+        let configPath = "\(settingsDir)/claude_desktop_config.json"
+        let projectPath = project.path.hasSuffix("/") ? String(project.path.dropLast()) : project.path
+        let gatewayConfigPath = "\(projectPath)/\(Config.gatewayConfigPath)"
+
+        // Check if file exists
+        guard FileManager.default.fileExists(atPath: configPath) else { return }
+
+        // Check modification date — skip if this is our own write
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: configPath),
+              let modDate = attrs[.modificationDate] as? Date else { return }
+
+        if let lastWrite = lastDesktopConfigWriteDate, modDate == lastWrite {
+            return // No external changes
+        }
+
+        // Read desktop config
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: configPath)),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+
+        let desktopServers = json["mcpServers"] as? [String: Any] ?? [:]
+
+        // Extract gateway-managed server names from desktop config
+        var desktopGatewayServerNames: Set<String> = []
+        for (_, config) in desktopServers {
+            if let serverDict = config as? [String: Any],
+               let env = serverDict["env"] as? [String: String],
+               let serverName = env["MCP_GATEWAY_SERVER"] {
+                desktopGatewayServerNames.insert(serverName)
+            }
+        }
+
+        // Read current gateway config
+        guard var gatewayConfig = loadGatewayConfig(path: gatewayConfigPath) else { return }
+
+        var changed = false
+
+        for (name, var serverConfig) in gatewayConfig.servers {
+            let isInDesktop = desktopGatewayServerNames.contains(name)
+
+            if serverConfig.enabled && !isInDesktop {
+                // Server was enabled in gateway but removed from desktop config
+                // → user disabled it in Claude Desktop
+                serverConfig.enabled = false
+                gatewayConfig.servers[name] = serverConfig
+                changed = true
+                logger.info("syncFromDesktopConfig: disabled \(name) (removed from Claude Desktop)")
+            } else if !serverConfig.enabled && isInDesktop {
+                // Server was disabled in gateway but present in desktop config
+                // → user re-enabled it in Claude Desktop
+                serverConfig.enabled = true
+                gatewayConfig.servers[name] = serverConfig
+                changed = true
+                logger.info("syncFromDesktopConfig: enabled \(name) (added in Claude Desktop)")
+            }
+        }
+
+        if changed {
+            // Write only gateway config (NOT desktop config to avoid loops)
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+            if let data = try? encoder.encode(gatewayConfig) {
+                try? data.write(to: URL(fileURLWithPath: gatewayConfigPath))
+            }
+
+            // Reload UI
+            DispatchQueue.main.async {
+                self.loadServers(for: project)
+            }
+        }
+
+        // Update tracking timestamp
+        lastDesktopConfigWriteDate = modDate
     }
 
     // MARK: - Claude Desktop Lifecycle (Global — isolation OFF)
