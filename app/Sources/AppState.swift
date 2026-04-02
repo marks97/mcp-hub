@@ -784,28 +784,26 @@ class AppState: ObservableObject {
             try? data.write(to: URL(fileURLWithPath: gatewayConfigPath))
         }
 
-        let mcpJson: [String: Any] = [
-            "mcpServers": [
-                "gateway": [
-                    "command": "node",
-                    "args": ["\(gatewayPath)/index.js"],
-                    "env": [
-                        "MCP_GATEWAY_CONFIG": gatewayConfigPath
-                    ]
-                ] as [String: Any]
-            ]
-        ]
+        // One gateway entry per enabled server
+        let nodeCommand = resolveCommand("node", projectPath: projectPath)
+        var mcpServerEntries: [String: Any] = [:]
+        for server in servers where server.enabled {
+            mcpServerEntries[server.name] = [
+                "command": nodeCommand,
+                "args": ["\(gatewayPath)/index.js"],
+                "env": [
+                    "MCP_GATEWAY_CONFIG": gatewayConfigPath,
+                    "MCP_GATEWAY_SERVER": server.name
+                ]
+            ] as [String: Any]
+        }
+        let mcpJson: [String: Any] = ["mcpServers": mcpServerEntries]
 
         if let data = try? JSONSerialization.data(withJSONObject: mcpJson, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]) {
             try? FileManager.default.removeItem(atPath: mcpJsonPath)
             try? data.write(to: URL(fileURLWithPath: mcpJsonPath))
         }
 
-        // Also update Claude Desktop config in isolation dir if it exists
-        let settingsDir = claudeSettingsDir(for: project)
-        if FileManager.default.fileExists(atPath: settingsDir) {
-            writeClaudeDesktopConfig(for: project)
-        }
     }
 
     // MARK: - Claude Desktop Lifecycle (Global — isolation OFF)
@@ -898,45 +896,6 @@ class AppState: ObservableObject {
         return "\(home)/claude-\(safeName)"
     }
 
-    /// Merges the gateway mcpServers entry into the project's claude_desktop_config.json,
-    /// preserving any existing keys (auth, preferences, etc.) that Claude Desktop stored.
-    func writeClaudeDesktopConfig(for project: Project) {
-        let settingsDir = claudeSettingsDir(for: project)
-        let projectPath = project.path.hasSuffix("/") ? String(project.path.dropLast()) : project.path
-        let gatewayConfigPath = "\(projectPath)/\(Config.gatewayConfigPath)"
-        let nodePath = resolveCommand("node", projectPath: projectPath)
-
-        try? FileManager.default.createDirectory(
-            atPath: settingsDir,
-            withIntermediateDirectories: true
-        )
-
-        let configPath = "\(settingsDir)/claude_desktop_config.json"
-
-        var existing: [String: Any] = [:]
-        if let data = try? Data(contentsOf: URL(fileURLWithPath: configPath)),
-           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-            existing = json
-        }
-
-        existing["mcpServers"] = [
-            "gateway": [
-                "command": nodePath,
-                "args": ["\(gatewayPath)/index.js"],
-                "env": [
-                    "MCP_GATEWAY_CONFIG": gatewayConfigPath
-                ]
-            ] as [String: Any]
-        ]
-
-        if let data = try? JSONSerialization.data(
-            withJSONObject: existing,
-            options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
-        ) {
-            try? data.write(to: URL(fileURLWithPath: configPath))
-        }
-    }
-
     /// Launches a new Claude Desktop instance for the given project.
     func launchClaudeForProject(_ project: Project) {
         let info = projectInstances[project.id] ?? ProjectInstanceInfo()
@@ -950,7 +909,6 @@ class AppState: ObservableObject {
         if project.id == selectedProject?.id {
             saveConfig()
         }
-        writeClaudeDesktopConfig(for: project)
 
         // Track that a launch is in progress to prevent double-clicks.
         logger.info("launchClaudeForProject: starting for \(project.name)")
@@ -1008,7 +966,6 @@ class AppState: ObservableObject {
         if project.id == selectedProject?.id {
             saveConfig()
         }
-        writeClaudeDesktopConfig(for: project)
 
         projectInstances[project.id] = ProjectInstanceInfo(
             isRunning: info.isRunning,

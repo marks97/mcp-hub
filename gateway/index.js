@@ -7,7 +7,7 @@ import {
   CallToolRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { readFileSync } from "fs";
-import { resolve } from "path";
+import { resolve, dirname } from "path";
 
 const CONFIG_PATH = process.env.MCP_GATEWAY_CONFIG;
 if (!CONFIG_PATH) {
@@ -15,7 +15,14 @@ if (!CONFIG_PATH) {
   process.exit(1);
 }
 
-const config = JSON.parse(readFileSync(resolve(CONFIG_PATH), "utf-8"));
+// Optional: only connect to a single named server from the config
+const SERVER_FILTER = process.env.MCP_GATEWAY_SERVER;
+
+const resolvedConfigPath = resolve(CONFIG_PATH);
+const config = JSON.parse(readFileSync(resolvedConfigPath, "utf-8"));
+
+// Derive project root from config path (always at .claude/infra/gateway.config.json)
+const projectRoot = resolve(dirname(resolvedConfigPath), "../..");
 
 const allTools = [];
 const toolToUpstream = new Map();
@@ -40,6 +47,7 @@ async function connectUpstream(name, serverConfig) {
     command: serverConfig.command,
     args: serverConfig.args || [],
     env: { ...process.env, ...(serverConfig.env || {}) },
+    cwd: projectRoot,
     stderr: "pipe",
   });
 
@@ -116,6 +124,7 @@ async function main() {
 
   for (const [name, serverConfig] of Object.entries(config.servers)) {
     if (!serverConfig.enabled) continue;
+    if (SERVER_FILTER && name !== SERVER_FILTER) continue;
     try {
       await connectUpstream(name, serverConfig);
     } catch (err) {
