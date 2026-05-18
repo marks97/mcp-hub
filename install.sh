@@ -19,6 +19,11 @@ echo "Installing gateway dependencies..."
 cd "$SCRIPT_DIR/gateway"
 npm install --silent
 
+echo "Bundling gateway sources for cloud Docker image..."
+mkdir -p "$PKG_DIR/Sources/Resources/gateway"
+cp "$SCRIPT_DIR/gateway/index.js" "$PKG_DIR/Sources/Resources/gateway/index.js"
+cp "$SCRIPT_DIR/gateway/package.json" "$PKG_DIR/Sources/Resources/gateway/package.json"
+
 echo "Building $APP_NAME..."
 cd "$PKG_DIR"
 swift build -c release 2>&1
@@ -29,6 +34,11 @@ mkdir -p "$APP_DIR/Contents/MacOS"
 mkdir -p "$APP_DIR/Contents/Resources"
 
 cp ".build/release/ClaudeHub" "$APP_DIR/Contents/MacOS/ClaudeHub"
+
+# Copy SPM resource bundle (gateway sources) so Bundle.module can find them
+if [ -d ".build/release/ClaudeHub_ClaudeHub.bundle" ]; then
+    cp -R ".build/release/ClaudeHub_ClaudeHub.bundle" "$APP_DIR/Contents/MacOS/"
+fi
 cp Info.plist "$APP_DIR/Contents/Info.plist"
 cp AppIcon.icns "$APP_DIR/Contents/Resources/AppIcon.icns"
 

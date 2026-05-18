@@ -78,7 +78,7 @@ struct CloudInstanceRow: View {
     private var statusColor: Color {
         switch runtimeInfo.status {
         case .running: return Theme.green
-        case .starting, .stopping: return Theme.orange
+        case .starting, .stopping, .terminating: return Theme.orange
         case .stopped, .terminated: return Theme.red
         case .unknown: return Theme.midGray
         }

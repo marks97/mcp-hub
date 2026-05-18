@@ -7,7 +7,10 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "ClaudeHub",
-            path: "Sources"
+            path: "Sources",
+            resources: [
+                .copy("Resources/gateway")
+            ]
         ),
         .testTarget(
             name: "ClaudeHubTests",

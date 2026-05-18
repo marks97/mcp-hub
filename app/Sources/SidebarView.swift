@@ -307,7 +307,7 @@ struct EmptyCloudInstancesView: View {
             } label: {
                 HStack(spacing: 4) {
                     Image(systemName: "plus")
-                    Text("Add Instance")
+                    Text("Create Instance")
                 }
                 .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(.white)

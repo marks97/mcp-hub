@@ -283,6 +283,7 @@ enum CloudInstanceStatus: String, Codable, CaseIterable, Hashable {
     case starting
     case running
     case stopping
+    case terminating  // AWS terminate-instances kicked off, cleanup pending
     case terminated
     case unknown
 
@@ -293,7 +294,7 @@ enum CloudInstanceStatus: String, Codable, CaseIterable, Hashable {
     var color: String {
         switch self {
         case .running: return "green"
-        case .starting, .stopping: return "orange"
+        case .starting, .stopping, .terminating: return "orange"
         case .stopped, .terminated: return "red"
         case .unknown: return "gray"
         }
@@ -350,16 +351,68 @@ struct SyncConfig: Codable, Hashable {
     var remotePath: String = "~/projects"
 
     static let defaultExcludes: [String] = [
-        "node_modules",
+        // Secrets — NEVER push these
+        ".env",
+        ".env.*",
+        "*.pem",
+        "*.key",
+        "id_rsa",
+        "id_ed25519",
+        ".aws",
+        // VCS
         ".git",
-        "build",
-        "dist",
-        "__pycache__",
-        ".venv",
-        ".next",
+        // Dependencies / package caches (any depth)
+        "**/node_modules",
+        ".npm",
+        ".yarn",
+        ".pnp.*",
+        "**/__pycache__",
+        "**/.venv",
+        "**/venv",
+        "vendor",
+        // Build output (any depth)
+        "**/build",
+        "**/dist",
+        "**/out",
+        "**/.next",
+        "**/.nuxt",
+        "**/.turbo",
+        "**/.cache",
+        "**/.parcel-cache",
+        "**/.svelte-kit",
+        "*.tsbuildinfo",
+        // iOS / macOS native build
+        "**/Pods",
+        "**/DerivedData",
+        "**/xcuserdata",
+        // Android native build
+        "**/.gradle",
+        "**/.cxx",
+        // React Native / Expo
+        "**/.expo",
+        "*.hbc",
+        // Mobile binaries
+        "*.apk",
+        "*.aab",
+        "*.ipa",
+        // Test/coverage
+        "**/coverage",
+        ".nyc_output",
+        // Browser data
+        ".playwright-mcp",
+        ".chromium",
+        // IDE / OS
         ".DS_Store",
+        ".idea",
+        ".vscode",
+        "Thumbs.db",
+        // Logs
         "*.log",
-        ".env.local",
+        "logs",
+        // Temp
+        "tmp",
+        "temp",
+        ".tmp",
     ]
 }
 
@@ -374,6 +427,9 @@ struct CloudInstance: Identifiable, Codable, Hashable {
     var dockerConfig: DockerConfig?
     var syncConfig: SyncConfig
     var pairedProjectIds: [String]
+    /// Path of project whose .env supplies AWS credentials for this instance.
+    /// Empty = use Keychain or ~/.aws/credentials.
+    var awsCredentialsProjectPath: String
 
     init(
         id: UUID = UUID(),
@@ -384,7 +440,8 @@ struct CloudInstance: Identifiable, Codable, Hashable {
         fargateConfig: FargateConfig? = nil,
         dockerConfig: DockerConfig? = nil,
         syncConfig: SyncConfig = SyncConfig(),
-        pairedProjectIds: [String] = []
+        pairedProjectIds: [String] = [],
+        awsCredentialsProjectPath: String = ""
     ) {
         self.id = id
         self.name = name
@@ -395,6 +452,25 @@ struct CloudInstance: Identifiable, Codable, Hashable {
         self.dockerConfig = dockerConfig
         self.syncConfig = syncConfig
         self.pairedProjectIds = pairedProjectIds
+        self.awsCredentialsProjectPath = awsCredentialsProjectPath
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, name, type, sshConfig, ec2Config, fargateConfig, dockerConfig, syncConfig, pairedProjectIds, awsCredentialsProjectPath
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        name = try c.decode(String.self, forKey: .name)
+        type = try c.decode(CloudInstanceType.self, forKey: .type)
+        sshConfig = try c.decodeIfPresent(SSHConfig.self, forKey: .sshConfig)
+        ec2Config = try c.decodeIfPresent(EC2Config.self, forKey: .ec2Config)
+        fargateConfig = try c.decodeIfPresent(FargateConfig.self, forKey: .fargateConfig)
+        dockerConfig = try c.decodeIfPresent(DockerConfig.self, forKey: .dockerConfig)
+        syncConfig = try c.decode(SyncConfig.self, forKey: .syncConfig)
+        pairedProjectIds = try c.decode([String].self, forKey: .pairedProjectIds)
+        awsCredentialsProjectPath = try c.decodeIfPresent(String.self, forKey: .awsCredentialsProjectPath) ?? ""
     }
 }
 
@@ -406,4 +482,34 @@ struct CloudInstanceRuntimeInfo {
     var lastSyncDate: Date? = nil
     var lastSyncError: String? = nil
     var tunnelPID: Int32? = nil
+    var setupPhase: SetupPhase = .unknown
+}
+
+/// Cloud-init / Docker readiness phase for EC2 instances.
+/// Detected by SSH-polling once the EC2 lifecycle says `running`.
+enum SetupPhase: String {
+    case unknown          // not yet determined / not applicable
+    case bootingHost      // EC2 is starting (pre-running)
+    case installingDocker // running, but ~/.claudehub-host-ready is absent
+    case buildingImage    // host-ready marker present, app is rsyncing build context + docker build
+    case containerStarting // image built, container starting up
+    case ready            // container running
+
+    var displayName: String {
+        switch self {
+        case .unknown: return ""
+        case .bootingHost: return "Booting host"
+        case .installingDocker: return "Installing Docker"
+        case .buildingImage: return "Building image"
+        case .containerStarting: return "Starting container"
+        case .ready: return "Ready"
+        }
+    }
+
+    var isProgress: Bool {
+        switch self {
+        case .bootingHost, .installingDocker, .buildingImage, .containerStarting: return true
+        case .ready, .unknown: return false
+        }
+    }
 }

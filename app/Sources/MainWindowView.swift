@@ -18,26 +18,41 @@ struct MainWindowView: View {
         }
         .navigationSplitViewStyle(.balanced)
         .toolbar {
-            ToolbarItemGroup(placement: .primaryAction) {
-                claudeStatusMenu
-                refreshButton
-
-                Menu {
-                    Button {
-                        appState.showAddProject()
+            ToolbarItem(placement: .primaryAction) {
+                HStack(spacing: 12) {
+                    claudeStatusMenu
+                        .compositingGroup()
+                        .shadow(color: .clear, radius: 0)
+                    refreshButton
+                        .compositingGroup()
+                        .shadow(color: .clear, radius: 0)
+                    Menu {
+                        Button {
+                            appState.showAddProject()
+                        } label: {
+                            Label("Add Project", systemImage: "folder.badge.plus")
+                        }
+                        Button {
+                            appState.showingAddCloudInstance = true
+                        } label: {
+                            Label("Create Instance", systemImage: "cloud.fill")
+                        }
                     } label: {
-                        Label("Add Project", systemImage: "folder.badge.plus")
+                        Label("Add", systemImage: "plus")
                     }
-
-                    Button {
-                        appState.showingAddCloudInstance = true
-                    } label: {
-                        Label("Add Cloud Instance", systemImage: "cloud.fill")
-                    }
-                } label: {
-                    Label("Add", systemImage: "plus")
+                    .menuStyle(.borderlessButton)
+                    .menuIndicator(.hidden)
+                    .fixedSize()
+                    .help("Add project or cloud instance")
+                    .compositingGroup()
+                    .shadow(color: .clear, radius: 0)
                 }
-                .help("Add project or cloud instance")
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(Color(red: 254/255, green: 254/255, blue: 254/255))
+                .clipShape(Capsule())
+                .compositingGroup()
+                .shadow(color: .clear, radius: 0)
             }
         }
         .frame(
@@ -104,11 +119,9 @@ struct MainWindowView: View {
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(Theme.textSecondary)
             }
-            .padding(.vertical, 4)
         }
         .menuStyle(.borderlessButton)
         .fixedSize()
-        .padding(.trailing, 12)
     }
 
     private var statusColor: Color {

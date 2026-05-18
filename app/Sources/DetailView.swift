@@ -32,17 +32,19 @@ struct ProjectDetailView: View {
 
             Divider()
 
-            if appState.servers.isEmpty {
-                emptyServersView
-            } else {
-                ScrollView {
-                    LazyVStack(spacing: 12) {
+            ScrollView {
+                LazyVStack(spacing: 12) {
+                    if appState.servers.isEmpty {
+                        emptyServersView
+                            .frame(minHeight: 300)
+                    } else {
                         ForEach(appState.servers) { server in
                             ServerCardView(server: server)
                         }
                     }
-                    .padding(20)
+                    cloudInstancesSection
                 }
+                .padding(20)
             }
         }
         .background(Theme.pampas.opacity(0.3))
@@ -144,9 +146,6 @@ struct ProjectDetailView: View {
                 )
             }
             .buttonStyle(.plain)
-
-            // Cloud instance actions (only if paired)
-            cloudActionButtons
         }
     }
 
@@ -331,6 +330,183 @@ struct ProjectDetailView: View {
             return "~" + path.dropFirst(home.count)
         }
         return path
+    }
+
+    // MARK: - Cloud Instances Section
+
+    @ViewBuilder
+    private var cloudInstancesSection: some View {
+        let paired = appState.cloudInstancesForProject(project)
+        let unpaired = appState.cloudInstances.filter { !$0.pairedProjectIds.contains(project.id) }
+
+        // Hide entire card if no cloud instances paired with this project.
+        if !paired.isEmpty {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    Text("Cloud Instances")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(Theme.textPrimary)
+                    Spacer()
+                    Menu {
+                        if unpaired.isEmpty {
+                            Text("All instances are paired")
+                        } else {
+                            ForEach(unpaired) { inst in
+                                Button {
+                                    appState.pairProject(project.id, with: inst.id)
+                                } label: {
+                                    Label(inst.name, systemImage: inst.type.iconName)
+                                }
+                            }
+                        }
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "plus")
+                            Text("Pair Instance")
+                        }
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(Theme.blue)
+                    }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+                }
+
+                VStack(spacing: 8) {
+                    ForEach(paired) { inst in
+                        ProjectCloudInstanceRow(project: project, instance: inst)
+                    }
+                }
+            }
+            .padding(16)
+            .background(Theme.cardBackground)
+            .clipShape(RoundedRectangle(cornerRadius: Theme.cornerRadius))
+            .overlay(
+                RoundedRectangle(cornerRadius: Theme.cornerRadius)
+                    .stroke(Theme.cardBorder, lineWidth: 1)
+            )
+        }
+    }
+}
+
+/// Compact row showing a cloud instance + actions, rendered inside a project's detail view.
+struct ProjectCloudInstanceRow: View {
+    let project: Project
+    let instance: CloudInstance
+    @EnvironmentObject var appState: AppState
+
+    private var runtimeInfo: CloudInstanceRuntimeInfo {
+        appState.cloudInstanceRuntimeInfo[instance.id] ?? CloudInstanceRuntimeInfo()
+    }
+
+    private var statusColor: Color {
+        switch runtimeInfo.status {
+        case .running: return Theme.green
+        case .starting, .stopping, .terminating: return Theme.orange
+        case .stopped, .terminated: return Theme.red
+        case .unknown: return Theme.midGray
+        }
+    }
+
+    var body: some View {
+        HStack(spacing: 10) {
+            CloudInstanceAvatar(instance: instance, size: 22)
+
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    Text(instance.name)
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(Theme.textPrimary)
+                    Text(instance.type.displayName)
+                        .font(.system(size: 9, weight: .medium))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 1)
+                        .background(Theme.blue)
+                        .clipShape(RoundedRectangle(cornerRadius: 3))
+                }
+                HStack(spacing: 6) {
+                    Circle().fill(statusColor).frame(width: 6, height: 6)
+                    Text(runtimeInfo.status.displayName)
+                        .font(.system(size: 10))
+                        .foregroundStyle(Theme.textTertiary)
+                    if let ip = runtimeInfo.publicIP {
+                        Text(ip)
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundStyle(Theme.textTertiary)
+                    }
+                }
+            }
+
+            Spacer()
+
+            // Sync (push, right-click for pull)
+            Button {
+                appState.syncProject(project, to: instance, direction: .push) { _, _ in }
+            } label: {
+                HStack(spacing: 3) {
+                    if runtimeInfo.isSyncing {
+                        ProgressView().controlSize(.mini).frame(width: 10, height: 10)
+                    } else {
+                        Image(systemName: "arrow.triangle.2.circlepath")
+                    }
+                    Text("Sync")
+                }
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(Theme.green)
+            }
+            .buttonStyle(.plain)
+            .disabled(runtimeInfo.isSyncing)
+            .help("Push (right-click for Pull)")
+            .contextMenu {
+                Button {
+                    appState.syncProject(project, to: instance, direction: .push) { _, _ in }
+                } label: { Label("Push to Remote", systemImage: "arrow.up.circle") }
+                Button {
+                    appState.syncProject(project, to: instance, direction: .pull) { _, _ in }
+                } label: { Label("Pull from Remote", systemImage: "arrow.down.circle") }
+            }
+
+            // Open in Instance
+            Button {
+                appState.launchClaudeForCloudInstance(instance, project: project)
+            } label: {
+                HStack(spacing: 3) {
+                    Image(systemName: "terminal")
+                    Text("Open")
+                }
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(Theme.orange)
+            }
+            .buttonStyle(.plain)
+
+            // Jump to instance (selects in sidebar so user can do lifecycle, automations, etc.)
+            Button {
+                appState.selectCloudInstance(instance)
+            } label: {
+                HStack(spacing: 3) {
+                    Image(systemName: "arrow.up.right.square")
+                    Text("Manage")
+                }
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(Theme.blue)
+            }
+            .buttonStyle(.plain)
+            .help("Open this instance's full detail view")
+
+            Button {
+                appState.unpairProject(project.id, from: instance.id)
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.system(size: 12))
+                    .foregroundStyle(Theme.red)
+            }
+            .buttonStyle(.plain)
+            .help("Unpair instance")
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(Theme.pampas.opacity(0.5))
+        .clipShape(RoundedRectangle(cornerRadius: Theme.smallCornerRadius))
     }
 }
 
