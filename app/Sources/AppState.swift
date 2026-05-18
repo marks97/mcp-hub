@@ -28,6 +28,15 @@ class AppState: ObservableObject {
     @Published var cloudInstanceRuntimeInfo: [UUID: CloudInstanceRuntimeInfo] = [:]
     @Published var showingAddCloudInstance = false
 
+    // Docker images
+    @Published var dockerImages: [DockerImage] = []
+    @Published var showingDockerImageEditor = false
+    /// Image currently being edited (nil = create new).
+    @Published var editingDockerImage: DockerImage?
+    /// Paused state of the Create Instance sheet, restored when it reopens
+    /// after the user finishes adding/editing an image. nil = no pending draft.
+    @Published var cloudInstanceDraft: CloudInstanceDraft?
+
     var anyProjectRestarting: Bool {
         isRestarting || projectInstances.values.contains { $0.isRestarting }
     }
@@ -42,6 +51,7 @@ class AppState: ObservableObject {
         static let userDefaultsKey = "savedProjects"
         static let settingsKey = "appSettings"
         static let cloudInstancesKey = "savedCloudInstances"
+        static let dockerImagesKey = "savedDockerImages"
         static let mcpConfigPath = ".claude/infra/.mcp.json"
         static let gatewayConfigPath = ".claude/infra/gateway.config.json"
         static let envFilePath = ".claude/infra/.env"
@@ -104,6 +114,8 @@ class AppState: ObservableObject {
         isClaudeRunning = findClaudeApp() != nil
         loadProjects()
         loadCloudInstances()
+        loadDockerImages()
+        seedBundledDockerImage()
         if let first = projects.first {
             selectedProject = first
             loadServers(for: first)
@@ -491,6 +503,111 @@ class AppState: ObservableObject {
         }
     }
 
+    // MARK: - Docker Image Management
+
+    func loadDockerImages() {
+        if let data = UserDefaults.standard.data(forKey: Config.dockerImagesKey),
+           let saved = try? JSONDecoder().decode([DockerImage].self, from: data) {
+            dockerImages = saved
+        }
+    }
+
+    func saveDockerImages() {
+        if let data = try? JSONEncoder().encode(dockerImages) {
+            UserDefaults.standard.set(data, forKey: Config.dockerImagesKey)
+        }
+    }
+
+    /// Ensures the bundled built-in image exists (and is up-to-date) in the
+    /// user's image list. Idempotent: called on every app launch.
+    func seedBundledDockerImage() {
+        let bundled = DockerImageBuilder.bundledDefaultImage()
+        if let idx = dockerImages.firstIndex(where: { $0.id == bundled.id }) {
+            // Refresh built-in content (Dockerfile/entrypoint may have been
+            // updated in a new app version). Preserve the same id so existing
+            // CloudInstance.dockerImageId references still resolve.
+            dockerImages[idx] = bundled
+        } else {
+            dockerImages.insert(bundled, at: 0)
+        }
+        saveDockerImages()
+    }
+
+    func addDockerImage(_ image: DockerImage) {
+        dockerImages.append(image)
+        saveDockerImages()
+    }
+
+    func updateDockerImage(_ image: DockerImage) {
+        guard let idx = dockerImages.firstIndex(where: { $0.id == image.id }) else { return }
+        dockerImages[idx] = image
+        saveDockerImages()
+    }
+
+    func removeDockerImage(_ image: DockerImage) {
+        guard !image.isBuiltIn else { return }
+        dockerImages.removeAll { $0.id == image.id }
+        // Unset any instance that pointed at this image.
+        for i in cloudInstances.indices where cloudInstances[i].dockerImageId == image.id {
+            cloudInstances[i].dockerImageId = nil
+        }
+        saveDockerImages()
+        saveCloudInstances()
+    }
+
+    func duplicateDockerImage(_ image: DockerImage) -> DockerImage {
+        let copy = DockerImage(
+            name: "\(image.name) Copy",
+            dockerfile: image.dockerfile,
+            entrypoint: image.entrypoint,
+            isBuiltIn: false
+        )
+        dockerImages.append(copy)
+        saveDockerImages()
+        return copy
+    }
+
+    /// Resolves the Docker image to use for an instance. Falls back to the
+    /// bundled default if the instance's id is nil or no longer present.
+    func dockerImage(for instance: CloudInstance) -> DockerImage {
+        if let id = instance.dockerImageId,
+           let img = dockerImages.first(where: { $0.id == id }) {
+            return img
+        }
+        return dockerImages.first(where: { $0.id == DockerImageBuilder.bundledDefaultImageId })
+            ?? DockerImageBuilder.bundledDefaultImage()
+    }
+
+    // MARK: - Modal Coordination (single-modal stack)
+
+    /// Pauses the Create Instance sheet (saving the form draft) and opens the
+    /// Docker image editor. When the editor closes, the form is restored.
+    /// `image` = nil → create new; non-nil → edit existing.
+    func pauseCloudInstanceSheetAndEditImage(draft: CloudInstanceDraft, image: DockerImage?) {
+        cloudInstanceDraft = draft
+        editingDockerImage = image
+        showingAddCloudInstance = false
+        showingDockerImageEditor = true
+    }
+
+    /// Closes the Docker image editor and resumes the Create Instance sheet
+    /// with the previously saved draft.
+    func closeImageEditorAndResumeCloudInstanceSheet() {
+        showingDockerImageEditor = false
+        editingDockerImage = nil
+        // Re-open the Create Instance sheet; AddCloudInstanceSheet.onAppear
+        // reads back cloudInstanceDraft if present.
+        if cloudInstanceDraft != nil {
+            showingAddCloudInstance = true
+        }
+    }
+
+    /// Discards any pending draft. Called when the Create Instance sheet is
+    /// dismissed via Cancel or successful creation.
+    func clearCloudInstanceDraft() {
+        cloudInstanceDraft = nil
+    }
+
     /// Polls a single cloud instance status (used on selection for instant feedback).
     func pollSingleInstance(_ instance: CloudInstance) {
         switch instance.type {
@@ -604,6 +721,11 @@ class AppState: ObservableObject {
         guard let target = resolveSSHTarget(for: instance) else { return }
         imageBootstrapInProgress.insert(instance.id)
 
+        let image = dockerImage(for: instance)
+        // Tag distinguishes per-image builds on the host so multiple instances
+        // pointing at different images don't trample each other's docker tag.
+        let imageTag = "claudehub:\(image.id.uuidString.prefix(8).lowercased())"
+
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
             defer {
@@ -612,7 +734,7 @@ class AppState: ObservableObject {
                 }
             }
 
-            guard let buildContext = DockerImageBuilder.writeBuildContext() else {
+            guard let buildContext = DockerImageBuilder.writeBuildContext(image: image) else {
                 logger.warning("Failed to write build context for \(instance.name, privacy: .public)")
                 return
             }
@@ -644,7 +766,7 @@ class AppState: ObservableObject {
                 set -e
                 chmod +x /opt/claudehub/entrypoint.sh
                 cd /opt/claudehub
-                docker build -t claudehub:default .
+                docker build -t \(imageTag) .
                 docker rm -f claudehub 2>/dev/null || true
                 docker run -d --name claudehub \
                     --restart unless-stopped \
@@ -655,7 +777,7 @@ class AppState: ObservableObject {
                     -p 2222:22 \
                     -v /home/ubuntu/projects:/workspace \
                     -v /home/ubuntu/.ssh/authorized_keys:/root/.ssh/authorized_keys:ro \
-                    claudehub:default
+                    \(imageTag)
                 """)
 
             let buildResult = self.runCommand(executable: "/usr/bin/ssh", arguments: buildSSHArgs, timeout: 900)

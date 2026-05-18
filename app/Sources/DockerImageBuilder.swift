@@ -1,9 +1,14 @@
 import Foundation
 
 /// Default Dockerfile and entrypoint for Claude Hub cloud instances.
-/// Provides: Node 22, Python 3, Chrome + Chromium, Playwright, VNC (Xvfb + x11vnc + noVNC),
-/// SSH server, Claude CLI, common dev tools.
+/// Provides: Node 22, Python 3, Chrome + Patchright (stealth-patched Playwright fork),
+/// VNC (Xvfb + x11vnc + noVNC), SSH server, Claude CLI, common dev tools.
 enum DockerImageBuilder {
+
+    /// Stable UUID for the bundled default image. Used as the seed identity so
+    /// existing instances pointing at it continue to resolve correctly across
+    /// app upgrades.
+    static let bundledDefaultImageId = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
 
     /// Returns the gateway/index.js content from the app bundle.
     static var gatewayIndexJS: String? {
@@ -50,9 +55,9 @@ enum DockerImageBuilder {
         apt-get install -y --no-install-recommends google-chrome-stable && \\
         rm -rf /var/lib/apt/lists/*
 
-    # Install Playwright + Chromium
-    RUN npm install -g playwright && \\
-        npx playwright install chromium --with-deps
+    # Install Patchright (stealth-patched Playwright fork) + Chromium
+    RUN npm install -g patchright && \\
+        npx patchright install chromium --with-deps
 
     # Install Claude CLI
     RUN npm install -g @anthropic-ai/claude-code
@@ -156,17 +161,29 @@ enum DockerImageBuilder {
     fi
     """
 
-    /// Returns the path to a temp directory containing the Dockerfile, entrypoint,
-    /// and gateway/ sources — the full build context the EC2 bootstrap needs.
-    /// Caller is responsible for cleanup.
-    static func writeBuildContext() -> String? {
+    /// The bundled built-in image. Seeded into the user's image list on first
+    /// run and refreshed (in place, preserving id) on subsequent launches.
+    static func bundledDefaultImage() -> DockerImage {
+        DockerImage(
+            id: bundledDefaultImageId,
+            name: "Claude Hub Default (Patchright + VNC)",
+            dockerfile: defaultDockerfile,
+            entrypoint: defaultEntrypoint,
+            isBuiltIn: true
+        )
+    }
+
+    /// Returns the path to a temp directory containing the supplied image's
+    /// Dockerfile + entrypoint plus the bundled gateway sources — the full
+    /// build context the EC2 bootstrap needs. Caller is responsible for cleanup.
+    static func writeBuildContext(image: DockerImage) -> String? {
         let tmpDir = NSTemporaryDirectory() + "claudehub-image-\(UUID().uuidString)"
         let fm = FileManager.default
         do {
             try fm.createDirectory(atPath: tmpDir, withIntermediateDirectories: true)
             try fm.createDirectory(atPath: "\(tmpDir)/gateway", withIntermediateDirectories: true)
-            try defaultDockerfile.write(toFile: "\(tmpDir)/Dockerfile", atomically: true, encoding: .utf8)
-            try defaultEntrypoint.write(toFile: "\(tmpDir)/entrypoint.sh", atomically: true, encoding: .utf8)
+            try image.dockerfile.write(toFile: "\(tmpDir)/Dockerfile", atomically: true, encoding: .utf8)
+            try image.entrypoint.write(toFile: "\(tmpDir)/entrypoint.sh", atomically: true, encoding: .utf8)
             try (gatewayIndexJS ?? "").write(toFile: "\(tmpDir)/gateway/index.js", atomically: true, encoding: .utf8)
             try (gatewayPackageJSON ?? "").write(toFile: "\(tmpDir)/gateway/package.json", atomically: true, encoding: .utf8)
             return tmpDir

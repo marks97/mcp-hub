@@ -35,6 +35,10 @@ struct AddCloudInstanceSheet: View {
     // Credentials source
     @State private var credentialsSource = "" // project path, or "" for Keychain/system
 
+    // Selected Docker image template (EC2 only). nil = bundled default.
+    @State private var selectedDockerImageId: UUID?
+    @State private var showingImagePicker = false
+
     // Provisioning state
     @State private var isProvisioning = false
     @State private var provisioningStatus = ""
@@ -87,7 +91,7 @@ struct AddCloudInstanceSheet: View {
                     .font(.system(size: 15, weight: .semibold))
                     .foregroundStyle(Theme.textPrimary)
                 Spacer()
-                Button { dismiss() } label: {
+                Button { cancelAndDismiss() } label: {
                     Image(systemName: "xmark.circle.fill")
                         .font(.system(size: 16))
                         .foregroundStyle(Theme.textTertiary)
@@ -182,7 +186,7 @@ struct AddCloudInstanceSheet: View {
                 }
 
                 Spacer()
-                Button("Cancel") { dismiss() }
+                Button("Cancel") { cancelAndDismiss() }
                     .keyboardShortcut(.cancelAction)
                     .disabled(isProvisioning)
 
@@ -194,6 +198,29 @@ struct AddCloudInstanceSheet: View {
         }
         .frame(width: 480, height: (instanceType == .ec2 || instanceType == .fargate) ? 460 : instanceType == .ssh ? 480 : 380)
         .onAppear {
+            if let d = appState.cloudInstanceDraft {
+                // Resuming from a paused state (e.g. after editing/adding a Docker image)
+                name = d.name
+                instanceType = d.instanceType
+                ec2Region = d.ec2Region
+                ec2InstanceType = d.ec2InstanceType
+                ec2VolumeGB = d.ec2VolumeGB
+                sshHost = d.sshHost
+                sshUser = d.sshUser
+                sshPort = d.sshPort
+                sshKeyPath = d.sshKeyPath
+                fargateRegion = d.fargateRegion
+                fargateImage = d.fargateImage
+                fargateUseDefault = d.fargateUseDefault
+                fargateCpu = d.fargateCpu
+                fargateMemory = d.fargateMemory
+                dockerImage = d.dockerImage
+                dockerContainerName = d.dockerContainerName
+                credentialsSource = d.credentialsSource
+                selectedDockerImageId = d.dockerImageId
+                appState.cloudInstanceDraft = nil
+                return
+            }
             ec2Region = appState.settings.awsDefaultRegion
             fargateRegion = appState.settings.awsDefaultRegion
             if !appState.settings.defaultSSHKeyPath.isEmpty {
@@ -205,7 +232,34 @@ struct AddCloudInstanceSheet: View {
             } else if appState.loadAWSCredentialsFromKeychain() != nil {
                 credentialsSource = "__keychain__"
             }
+            // Default image = bundled
+            selectedDockerImageId = nil
         }
+    }
+
+    /// Snapshot the form into a draft so it can be restored after a paused
+    /// modal (Docker image editor) returns control.
+    private func makeDraft() -> CloudInstanceDraft {
+        CloudInstanceDraft(
+            name: name,
+            instanceType: instanceType,
+            ec2Region: ec2Region,
+            ec2InstanceType: ec2InstanceType,
+            ec2VolumeGB: ec2VolumeGB,
+            sshHost: sshHost,
+            sshUser: sshUser,
+            sshPort: sshPort,
+            sshKeyPath: sshKeyPath,
+            fargateRegion: fargateRegion,
+            fargateImage: fargateImage,
+            fargateUseDefault: fargateUseDefault,
+            fargateCpu: fargateCpu,
+            fargateMemory: fargateMemory,
+            dockerImage: dockerImage,
+            dockerContainerName: dockerContainerName,
+            credentialsSource: credentialsSource,
+            dockerImageId: selectedDockerImageId
+        )
     }
 
     private var createButtonTitle: String {
@@ -279,6 +333,10 @@ struct AddCloudInstanceSheet: View {
                         .font(.system(size: 10))
                         .foregroundStyle(Theme.textTertiary)
                 }
+            }
+
+            fieldGroup(label: "Docker Image") {
+                imagePicker
             }
 
             VStack(alignment: .leading, spacing: 6) {
@@ -477,6 +535,100 @@ struct AddCloudInstanceSheet: View {
         .clipShape(RoundedRectangle(cornerRadius: Theme.smallCornerRadius))
     }
 
+    // MARK: - Image Picker
+
+    /// Resolved currently-selected image (falls back to bundled default).
+    private var selectedImage: DockerImage {
+        if let id = selectedDockerImageId,
+           let img = appState.dockerImages.first(where: { $0.id == id }) {
+            return img
+        }
+        return appState.dockerImages.first(where: { $0.id == DockerImageBuilder.bundledDefaultImageId })
+            ?? DockerImageBuilder.bundledDefaultImage()
+    }
+
+    private var imagePicker: some View {
+        Button {
+            showingImagePicker.toggle()
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "shippingbox")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Theme.textSecondary)
+                Text(selectedImage.name)
+                    .font(.system(size: 12))
+                    .foregroundStyle(Theme.textPrimary)
+                Spacer()
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 10))
+                    .foregroundStyle(Theme.textTertiary)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .frame(maxWidth: .infinity)
+            .background(Color.white)
+            .overlay(
+                RoundedRectangle(cornerRadius: Theme.smallCornerRadius)
+                    .stroke(Theme.cardBorder, lineWidth: 1)
+            )
+            .clipShape(RoundedRectangle(cornerRadius: Theme.smallCornerRadius))
+        }
+        .buttonStyle(.plain)
+        .popover(isPresented: $showingImagePicker, arrowEdge: .bottom) {
+            imagePickerMenu
+        }
+    }
+
+    private var imagePickerMenu: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(appState.dockerImages) { img in
+                ImagePickerRow(
+                    image: img,
+                    isSelected: img.id == selectedImage.id,
+                    onSelect: {
+                        selectedDockerImageId = (img.id == DockerImageBuilder.bundledDefaultImageId) ? nil : img.id
+                        showingImagePicker = false
+                    },
+                    onDuplicate: {
+                        let copy = appState.duplicateDockerImage(img)
+                        showingImagePicker = false
+                        // Open the editor on the new copy. Pause sheet first.
+                        appState.pauseCloudInstanceSheetAndEditImage(draft: makeDraft(), image: copy)
+                    },
+                    onDelete: img.isBuiltIn ? nil : {
+                        appState.removeDockerImage(img)
+                        if selectedDockerImageId == img.id { selectedDockerImageId = nil }
+                    },
+                    onEdit: img.isBuiltIn ? nil : {
+                        showingImagePicker = false
+                        appState.pauseCloudInstanceSheetAndEditImage(draft: makeDraft(), image: img)
+                    }
+                )
+            }
+
+            Divider()
+
+            Button {
+                showingImagePicker = false
+                appState.pauseCloudInstanceSheetAndEditImage(draft: makeDraft(), image: nil)
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "plus.circle")
+                        .font(.system(size: 11))
+                    Text("Add new image…")
+                        .font(.system(size: 12))
+                }
+                .foregroundStyle(Theme.textPrimary)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .buttonStyle(.plain)
+        }
+        .frame(width: 360)
+        .padding(.vertical, 4)
+    }
+
     // MARK: - Helpers
 
     private func fieldGroup<Content: View>(label: String, @ViewBuilder content: () -> Content) -> some View {
@@ -540,6 +692,13 @@ struct AddCloudInstanceSheet: View {
             )
         )
         appState.addCloudInstance(instance)
+        cancelAndDismiss()
+    }
+
+    /// Closes the sheet and discards any pending draft (Cancel and successful
+    /// create both go through here).
+    private func cancelAndDismiss() {
+        appState.clearCloudInstanceDraft()
         dismiss()
     }
 
@@ -567,7 +726,7 @@ struct AddCloudInstanceSheet: View {
 
         appState.dockerRun(instance) { success, message in
             if success {
-                dismiss()
+                cancelAndDismiss()
             } else {
                 provisioningError = message
                 isProvisioning = false
@@ -818,7 +977,8 @@ struct AddCloudInstanceSheet: View {
                         sshUser: "ubuntu",
                         sshKeyPath: keyPath
                     ),
-                    awsCredentialsProjectPath: credentialsSource
+                    awsCredentialsProjectPath: credentialsSource,
+                    dockerImageId: selectedDockerImageId
                 )
                 appState.addCloudInstance(instance)
 
@@ -830,7 +990,7 @@ struct AddCloudInstanceSheet: View {
                 }
 
                 isProvisioning = false
-                dismiss()
+                cancelAndDismiss()
             }
         }
     }
@@ -1147,7 +1307,7 @@ struct AddCloudInstanceSheet: View {
                 )
 
                 isProvisioning = false
-                dismiss()
+                cancelAndDismiss()
             }
         }
     }
@@ -1231,8 +1391,9 @@ struct AddCloudInstanceSheet: View {
 
         DispatchQueue.main.async { provisioningStatus = "Building Docker image (this takes ~5 minutes)..." }
 
-        // Write build context
-        guard let buildDir = DockerImageBuilder.writeBuildContext() else {
+        // Write build context (Fargate default uses the bundled image; the
+        // per-instance picker only applies to EC2 today).
+        guard let buildDir = DockerImageBuilder.writeBuildContext(image: DockerImageBuilder.bundledDefaultImage()) else {
             DispatchQueue.main.async {
                 provisioningError = "Failed to create build context"
                 isProvisioning = false
@@ -1389,5 +1550,76 @@ struct AddCloudInstanceSheet: View {
                 }
             }
         }
+    }
+}
+
+/// Row in the Docker-image picker popover. Shows duplicate/edit/delete
+/// buttons on hover; tap the row body to select.
+private struct ImagePickerRow: View {
+    let image: DockerImage
+    let isSelected: Bool
+    let onSelect: () -> Void
+    let onDuplicate: () -> Void
+    let onDelete: (() -> Void)?
+    let onEdit: (() -> Void)?
+
+    @State private var isHovering = false
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                .font(.system(size: 11))
+                .foregroundStyle(isSelected ? Theme.orange : Theme.textTertiary)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(image.name)
+                    .font(.system(size: 12))
+                    .foregroundStyle(Theme.textPrimary)
+                    .lineLimit(1)
+                if image.isBuiltIn {
+                    Text("Built-in")
+                        .font(.system(size: 10))
+                        .foregroundStyle(Theme.textTertiary)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+            .onTapGesture {
+                onSelect()
+            }
+
+            if isHovering {
+                if let onEdit {
+                    rowButton(systemImage: "pencil", help: "Edit image", action: onEdit)
+                }
+                rowButton(systemImage: "doc.on.doc", help: "Duplicate", action: onDuplicate)
+                if let onDelete {
+                    rowButton(systemImage: "trash", help: "Delete", action: onDelete)
+                }
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(isHovering ? Theme.pampas : Color.clear)
+        .onHover { hovering in
+            isHovering = hovering
+        }
+    }
+
+    private func rowButton(systemImage: String, help: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: systemImage)
+                .font(.system(size: 11))
+                .foregroundStyle(Theme.textSecondary)
+                .frame(width: 22, height: 22)
+                .background(Color.white)
+                .clipShape(RoundedRectangle(cornerRadius: 4))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 4)
+                        .stroke(Theme.cardBorder, lineWidth: 1)
+                )
+        }
+        .buttonStyle(.plain)
+        .help(help)
     }
 }

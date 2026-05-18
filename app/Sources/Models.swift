@@ -430,6 +430,9 @@ struct CloudInstance: Identifiable, Codable, Hashable {
     /// Path of project whose .env supplies AWS credentials for this instance.
     /// Empty = use Keychain or ~/.aws/credentials.
     var awsCredentialsProjectPath: String
+    /// Docker image to use when bootstrapping the container on this instance.
+    /// nil = use the bundled default image.
+    var dockerImageId: UUID?
 
     init(
         id: UUID = UUID(),
@@ -441,7 +444,8 @@ struct CloudInstance: Identifiable, Codable, Hashable {
         dockerConfig: DockerConfig? = nil,
         syncConfig: SyncConfig = SyncConfig(),
         pairedProjectIds: [String] = [],
-        awsCredentialsProjectPath: String = ""
+        awsCredentialsProjectPath: String = "",
+        dockerImageId: UUID? = nil
     ) {
         self.id = id
         self.name = name
@@ -453,10 +457,11 @@ struct CloudInstance: Identifiable, Codable, Hashable {
         self.syncConfig = syncConfig
         self.pairedProjectIds = pairedProjectIds
         self.awsCredentialsProjectPath = awsCredentialsProjectPath
+        self.dockerImageId = dockerImageId
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, name, type, sshConfig, ec2Config, fargateConfig, dockerConfig, syncConfig, pairedProjectIds, awsCredentialsProjectPath
+        case id, name, type, sshConfig, ec2Config, fargateConfig, dockerConfig, syncConfig, pairedProjectIds, awsCredentialsProjectPath, dockerImageId
     }
 
     init(from decoder: Decoder) throws {
@@ -471,7 +476,63 @@ struct CloudInstance: Identifiable, Codable, Hashable {
         syncConfig = try c.decode(SyncConfig.self, forKey: .syncConfig)
         pairedProjectIds = try c.decode([String].self, forKey: .pairedProjectIds)
         awsCredentialsProjectPath = try c.decodeIfPresent(String.self, forKey: .awsCredentialsProjectPath) ?? ""
+        dockerImageId = try c.decodeIfPresent(UUID.self, forKey: .dockerImageId)
     }
+}
+
+// MARK: - Docker Images
+
+/// A user-managed Docker image template (Dockerfile + entrypoint) used to
+/// bootstrap the container on cloud instances. The bundled default ships with
+/// Patchright + Chrome + VNC; users can duplicate it and tweak.
+struct DockerImage: Identifiable, Codable, Hashable {
+    let id: UUID
+    var name: String
+    var dockerfile: String
+    var entrypoint: String
+    /// Built-in image cannot be deleted or renamed. Users duplicate it to
+    /// create their own variants.
+    var isBuiltIn: Bool
+
+    init(
+        id: UUID = UUID(),
+        name: String,
+        dockerfile: String,
+        entrypoint: String,
+        isBuiltIn: Bool = false
+    ) {
+        self.id = id
+        self.name = name
+        self.dockerfile = dockerfile
+        self.entrypoint = entrypoint
+        self.isBuiltIn = isBuiltIn
+    }
+}
+
+// MARK: - Cloud Instance Form Draft
+
+/// Captured form state for the Create Instance sheet. Lives in AppState so the
+/// form can be paused (when stacking modals like the Docker image editor) and
+/// resumed without losing user input.
+struct CloudInstanceDraft {
+    var name: String = ""
+    var instanceType: CloudInstanceType = .ec2
+    var ec2Region: String = "us-east-1"
+    var ec2InstanceType: String = "t3.small"
+    var ec2VolumeGB: String = "30"
+    var sshHost: String = ""
+    var sshUser: String = ""
+    var sshPort: String = "22"
+    var sshKeyPath: String = ""
+    var fargateRegion: String = "us-east-1"
+    var fargateImage: String = ""
+    var fargateUseDefault: Bool = true
+    var fargateCpu: String = "1024"
+    var fargateMemory: String = "2048"
+    var dockerImage: String = "ubuntu:24.04"
+    var dockerContainerName: String = ""
+    var credentialsSource: String = ""
+    var dockerImageId: UUID? = nil
 }
 
 /// Runtime state for a cloud instance (not persisted).

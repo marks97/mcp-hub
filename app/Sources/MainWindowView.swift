@@ -63,6 +63,10 @@ struct MainWindowView: View {
             AddCloudInstanceSheet()
                 .environmentObject(appState)
         }
+        .sheet(isPresented: $appState.showingDockerImageEditor) {
+            DockerImageEditorSheet()
+                .environmentObject(appState)
+        }
         .onChange(of: isLoading) { _, loading in
             isSpinning = loading
         }
