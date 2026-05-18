@@ -39,6 +39,9 @@ struct AddCloudInstanceSheet: View {
     @State private var selectedDockerImageId: UUID?
     @State private var showingImagePicker = false
 
+    // Optional proxy URL — routes ALL container traffic through it (tun2socks).
+    @State private var proxyURL: String = ""
+
     // Provisioning state
     @State private var isProvisioning = false
     @State private var provisioningStatus = ""
@@ -196,7 +199,7 @@ struct AddCloudInstanceSheet: View {
             }
             .padding(16)
         }
-        .frame(width: 480, height: (instanceType == .ec2 || instanceType == .fargate) ? 460 : instanceType == .ssh ? 480 : 380)
+        .frame(width: 480, height: instanceType == .ec2 ? 620 : instanceType == .fargate ? 460 : instanceType == .ssh ? 480 : 380)
         .onAppear {
             if let d = appState.cloudInstanceDraft {
                 // Resuming from a paused state (e.g. after editing/adding a Docker image)
@@ -218,6 +221,7 @@ struct AddCloudInstanceSheet: View {
                 dockerContainerName = d.dockerContainerName
                 credentialsSource = d.credentialsSource
                 selectedDockerImageId = d.dockerImageId
+                proxyURL = d.proxyURL
                 appState.cloudInstanceDraft = nil
                 return
             }
@@ -258,7 +262,8 @@ struct AddCloudInstanceSheet: View {
             dockerImage: dockerImage,
             dockerContainerName: dockerContainerName,
             credentialsSource: credentialsSource,
-            dockerImageId: selectedDockerImageId
+            dockerImageId: selectedDockerImageId,
+            proxyURL: proxyURL
         )
     }
 
@@ -337,6 +342,15 @@ struct AddCloudInstanceSheet: View {
 
             fieldGroup(label: "Docker Image") {
                 imagePicker
+            }
+
+            fieldGroup(label: "Proxy URL (optional)") {
+                TextField("socks5://user:pass@home.example.com:1080", text: $proxyURL)
+                    .textFieldStyle(.roundedBorder)
+                    .autocorrectionDisabled(true)
+                Text("Routes ALL container traffic through this proxy via tun2socks. Supports socks5/socks4/http/https. Leave empty for direct AWS egress.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(Theme.textTertiary)
             }
 
             VStack(alignment: .leading, spacing: 6) {
@@ -978,7 +992,8 @@ struct AddCloudInstanceSheet: View {
                         sshKeyPath: keyPath
                     ),
                     awsCredentialsProjectPath: credentialsSource,
-                    dockerImageId: selectedDockerImageId
+                    dockerImageId: selectedDockerImageId,
+                    proxyURL: proxyURL.trimmingCharacters(in: .whitespaces)
                 )
                 appState.addCloudInstance(instance)
 

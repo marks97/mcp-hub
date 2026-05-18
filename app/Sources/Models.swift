@@ -433,6 +433,10 @@ struct CloudInstance: Identifiable, Codable, Hashable {
     /// Docker image to use when bootstrapping the container on this instance.
     /// nil = use the bundled default image.
     var dockerImageId: UUID?
+    /// Proxy URL to route ALL container traffic through (via tun2socks).
+    /// Empty = no proxy. Supports socks5/socks4/http/https schemes.
+    /// Example: `socks5://user:pass@home.example.com:1080`
+    var proxyURL: String
 
     init(
         id: UUID = UUID(),
@@ -445,7 +449,8 @@ struct CloudInstance: Identifiable, Codable, Hashable {
         syncConfig: SyncConfig = SyncConfig(),
         pairedProjectIds: [String] = [],
         awsCredentialsProjectPath: String = "",
-        dockerImageId: UUID? = nil
+        dockerImageId: UUID? = nil,
+        proxyURL: String = ""
     ) {
         self.id = id
         self.name = name
@@ -458,10 +463,11 @@ struct CloudInstance: Identifiable, Codable, Hashable {
         self.pairedProjectIds = pairedProjectIds
         self.awsCredentialsProjectPath = awsCredentialsProjectPath
         self.dockerImageId = dockerImageId
+        self.proxyURL = proxyURL
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, name, type, sshConfig, ec2Config, fargateConfig, dockerConfig, syncConfig, pairedProjectIds, awsCredentialsProjectPath, dockerImageId
+        case id, name, type, sshConfig, ec2Config, fargateConfig, dockerConfig, syncConfig, pairedProjectIds, awsCredentialsProjectPath, dockerImageId, proxyURL
     }
 
     init(from decoder: Decoder) throws {
@@ -477,6 +483,7 @@ struct CloudInstance: Identifiable, Codable, Hashable {
         pairedProjectIds = try c.decode([String].self, forKey: .pairedProjectIds)
         awsCredentialsProjectPath = try c.decodeIfPresent(String.self, forKey: .awsCredentialsProjectPath) ?? ""
         dockerImageId = try c.decodeIfPresent(UUID.self, forKey: .dockerImageId)
+        proxyURL = try c.decodeIfPresent(String.self, forKey: .proxyURL) ?? ""
     }
 }
 
@@ -533,6 +540,7 @@ struct CloudInstanceDraft {
     var dockerContainerName: String = ""
     var credentialsSource: String = ""
     var dockerImageId: UUID? = nil
+    var proxyURL: String = ""
 }
 
 /// Runtime state for a cloud instance (not persisted).

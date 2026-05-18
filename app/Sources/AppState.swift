@@ -762,6 +762,15 @@ class AppState: ObservableObject {
             if target.port != 22 { buildSSHArgs += ["-p", "\(target.port)"] }
             if !target.keyPath.isEmpty { buildSSHArgs += ["-i", keyExpanded] }
             buildSSHArgs.append(userHost)
+            // PROXY_URL is shell-escaped on the local side. tun2socks reads it
+            // raw via env, so embedded special chars survive intact.
+            let proxyEnvLine: String
+            if instance.proxyURL.isEmpty {
+                proxyEnvLine = ""
+            } else {
+                let escaped = instance.proxyURL.replacingOccurrences(of: "'", with: "'\\''")
+                proxyEnvLine = "-e PROXY_URL='\(escaped)' \\\n                    "
+            }
             buildSSHArgs.append("""
                 set -e
                 chmod +x /opt/claudehub/entrypoint.sh
@@ -771,8 +780,10 @@ class AppState: ObservableObject {
                 docker run -d --name claudehub \
                     --restart unless-stopped \
                     --cap-add=SYS_ADMIN \
+                    --cap-add=NET_ADMIN \
+                    --device=/dev/net/tun \
                     --shm-size=2g \
-                    -p 5900:5900 \
+                    \(proxyEnvLine)-p 5900:5900 \
                     -p 6080:6080 \
                     -p 2222:22 \
                     -v /home/ubuntu/projects:/workspace \
