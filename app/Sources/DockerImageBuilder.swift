@@ -75,17 +75,12 @@ enum DockerImageBuilder {
 
     # Stealth wrapper for google-chrome: disables WebRTC IP leak even when
     # the network is tunneled. Apps that launch Chrome via `google-chrome`
-    # pick this up automatically.
+    # pick this up automatically. Shipped as a separate file in the build
+    # context (see google-chrome-wrapper.sh) to avoid shell-escape hazards
+    # that mangle line continuations when generating it inside RUN.
+    COPY google-chrome-wrapper.sh /tmp/google-chrome-wrapper.sh
     RUN mv /usr/bin/google-chrome /usr/bin/google-chrome-real && \\
-        printf '%s\\n' \\
-            '#!/bin/bash' \\
-            'exec /usr/bin/google-chrome-real \\\\' \\
-            '  --no-sandbox \\\\' \\
-            '  --disable-blink-features=AutomationControlled \\\\' \\
-            '  --webrtc-ip-handling-policy=disable_non_proxied_udp \\\\' \\
-            '  --force-webrtc-ip-handling-policy \\\\' \\
-            '  "$@"' \\
-            > /usr/bin/google-chrome && \\
+        mv /tmp/google-chrome-wrapper.sh /usr/bin/google-chrome && \\
         chmod +x /usr/bin/google-chrome
 
     # Install MCP Gateway (bundled from claude-hub/gateway/)
@@ -241,6 +236,20 @@ enum DockerImageBuilder {
     fi
     """
 
+    /// Stealth wrapper that replaces /usr/bin/google-chrome in the image.
+    /// Forwards every flag the caller passes through "$@", plus a few baseline
+    /// stealth/leak flags. Lives in the build context as a separate file so we
+    /// don't have to fight shell-escape rules generating it via `RUN printf`.
+    static let defaultChromeWrapper: String = """
+    #!/bin/bash
+    exec /usr/bin/google-chrome-real \\
+      --no-sandbox \\
+      --disable-blink-features=AutomationControlled \\
+      --webrtc-ip-handling-policy=disable_non_proxied_udp \\
+      --force-webrtc-ip-handling-policy \\
+      "$@"
+    """
+
     /// The bundled built-in image. Seeded into the user's image list on first
     /// run and refreshed (in place, preserving id) on subsequent launches.
     static func bundledDefaultImage() -> DockerImage {
@@ -264,6 +273,7 @@ enum DockerImageBuilder {
             try fm.createDirectory(atPath: "\(tmpDir)/gateway", withIntermediateDirectories: true)
             try image.dockerfile.write(toFile: "\(tmpDir)/Dockerfile", atomically: true, encoding: .utf8)
             try image.entrypoint.write(toFile: "\(tmpDir)/entrypoint.sh", atomically: true, encoding: .utf8)
+            try defaultChromeWrapper.write(toFile: "\(tmpDir)/google-chrome-wrapper.sh", atomically: true, encoding: .utf8)
             try (gatewayIndexJS ?? "").write(toFile: "\(tmpDir)/gateway/index.js", atomically: true, encoding: .utf8)
             try (gatewayPackageJSON ?? "").write(toFile: "\(tmpDir)/gateway/package.json", atomically: true, encoding: .utf8)
             return tmpDir
