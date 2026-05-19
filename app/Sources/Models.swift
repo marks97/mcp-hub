@@ -572,6 +572,7 @@ struct CloudInstanceDraft {
     var ec2Region: String = "us-east-1"
     var ec2InstanceType: String = "t3.small"
     var ec2VolumeGB: String = "30"
+    var ec2SwapGB: String = "0"
     var ec2Unlimited: Bool = true
     var sshHost: String = ""
     var sshUser: String = ""

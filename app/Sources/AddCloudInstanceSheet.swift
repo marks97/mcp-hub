@@ -12,6 +12,7 @@ struct AddCloudInstanceSheet: View {
     @State private var ec2Region = "us-east-1"
     @State private var ec2InstanceType = "t3.small"
     @State private var ec2VolumeGB = "30"
+    @State private var ec2SwapGB = "0"
     @State private var ec2Unlimited = true
 
     // SSH — connect to existing machine
@@ -209,6 +210,7 @@ struct AddCloudInstanceSheet: View {
                 ec2Region = d.ec2Region
                 ec2InstanceType = d.ec2InstanceType
                 ec2VolumeGB = d.ec2VolumeGB
+                ec2SwapGB = d.ec2SwapGB
                 ec2Unlimited = d.ec2Unlimited
                 sshHost = d.sshHost
                 sshUser = d.sshUser
@@ -252,6 +254,7 @@ struct AddCloudInstanceSheet: View {
             ec2Region: ec2Region,
             ec2InstanceType: ec2InstanceType,
             ec2VolumeGB: ec2VolumeGB,
+            ec2SwapGB: ec2SwapGB,
             ec2Unlimited: ec2Unlimited,
             sshHost: sshHost,
             sshUser: sshUser,
@@ -338,6 +341,17 @@ struct AddCloudInstanceSheet: View {
                         .textFieldStyle(.roundedBorder)
                         .frame(width: 80)
                     Text(diskCostNote)
+                        .font(.system(size: 10))
+                        .foregroundStyle(Theme.textTertiary)
+                }
+            }
+
+            fieldGroup(label: "Swap (GB)") {
+                HStack(spacing: 8) {
+                    TextField("0", text: $ec2SwapGB)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 80)
+                    Text("0 = no swap. Add some (e.g. 2) if you'll run memory-heavy stuff like Chrome+VNC on a small instance.")
                         .font(.system(size: 10))
                         .foregroundStyle(Theme.textTertiary)
                 }
@@ -781,6 +795,7 @@ struct AddCloudInstanceSheet: View {
         let region = ec2Region
         let instType = ec2InstanceType
         let volumeGB = max(8, Int(ec2VolumeGB.trimmingCharacters(in: .whitespaces)) ?? 30)
+        let swapGB = max(0, Int(ec2SwapGB.trimmingCharacters(in: .whitespaces)) ?? 0)
 
         DispatchQueue.global(qos: .userInitiated).async {
             let env = buildAWSEnv(region: region)
@@ -928,7 +943,7 @@ struct AddCloudInstanceSheet: View {
             }
 
             // Step 4: Launch instance
-            let setupScript = Self.instanceSetupScript
+            let setupScript = Self.instanceSetupScript(swapGB: swapGB)
             let encodedScript = Data(setupScript.utf8).base64EncodedString()
 
             // Block device mapping for root volume (EBS gp3, delete-on-termination)
@@ -1520,7 +1535,25 @@ struct AddCloudInstanceSheet: View {
     /// finishes the bootstrap (rsync build context + docker build + docker run)
     /// over SSH once the host is reachable. Keeps user-data well under AWS's
     /// 16KB hard limit.
-    static var instanceSetupScript: String {
+    static func instanceSetupScript(swapGB: Int) -> String {
+        let swapBlock: String
+        if swapGB > 0 {
+            swapBlock = """
+
+            # \(swapGB) GB swap — opt-in via the form. Keeps small instances alive
+            # if memory spikes (Chrome/VNC/etc). Without it, OOM-killer freezes sshd.
+            if [ ! -f /swapfile ]; then
+                fallocate -l \(swapGB)G /swapfile
+                chmod 600 /swapfile
+                mkswap /swapfile
+                swapon /swapfile
+                echo "/swapfile none swap sw 0 0" >> /etc/fstab
+            fi
+            """
+        } else {
+            swapBlock = ""
+        }
+
         return """
         #!/bin/bash
         set -ex
@@ -1528,16 +1561,7 @@ struct AddCloudInstanceSheet: View {
 
         apt-get update
         apt-get install -y curl git unzip jq rsync ca-certificates gnupg
-
-        # 2 GB swap — keeps small instances alive when Chrome+VNC spike memory.
-        # Without this, OOM-killer freezes sshd and the box becomes unreachable.
-        if [ ! -f /swapfile ]; then
-            fallocate -l 2G /swapfile
-            chmod 600 /swapfile
-            mkswap /swapfile
-            swapon /swapfile
-            echo "/swapfile none swap sw 0 0" >> /etc/fstab
-        fi
+        \(swapBlock)
 
         # Install Docker
         install -m 0755 -d /etc/apt/keyrings
