@@ -323,6 +323,47 @@ struct EC2Config: Codable, Hashable {
     /// at $0.05/vCPU-hour to avoid throttling under sustained load.
     /// Ignored for non-burstable types.
     var cpuCreditsUnlimited: Bool = false
+
+    // Custom Codable so adding new fields doesn't break decoding of older saved
+    // CloudInstance JSON in UserDefaults.
+    enum CodingKeys: String, CodingKey {
+        case instanceId, region, instanceType, ami, keyPair, securityGroup, sshUser, sshKeyPath, cpuCreditsUnlimited
+    }
+
+    init(
+        instanceId: String = "",
+        region: String = "us-east-1",
+        instanceType: String = "t3.micro",
+        ami: String = "",
+        keyPair: String = "",
+        securityGroup: String = "",
+        sshUser: String = "ec2-user",
+        sshKeyPath: String = "",
+        cpuCreditsUnlimited: Bool = false
+    ) {
+        self.instanceId = instanceId
+        self.region = region
+        self.instanceType = instanceType
+        self.ami = ami
+        self.keyPair = keyPair
+        self.securityGroup = securityGroup
+        self.sshUser = sshUser
+        self.sshKeyPath = sshKeyPath
+        self.cpuCreditsUnlimited = cpuCreditsUnlimited
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        instanceId = try c.decodeIfPresent(String.self, forKey: .instanceId) ?? ""
+        region = try c.decodeIfPresent(String.self, forKey: .region) ?? "us-east-1"
+        instanceType = try c.decodeIfPresent(String.self, forKey: .instanceType) ?? "t3.micro"
+        ami = try c.decodeIfPresent(String.self, forKey: .ami) ?? ""
+        keyPair = try c.decodeIfPresent(String.self, forKey: .keyPair) ?? ""
+        securityGroup = try c.decodeIfPresent(String.self, forKey: .securityGroup) ?? ""
+        sshUser = try c.decodeIfPresent(String.self, forKey: .sshUser) ?? "ec2-user"
+        sshKeyPath = try c.decodeIfPresent(String.self, forKey: .sshKeyPath) ?? ""
+        cpuCreditsUnlimited = try c.decodeIfPresent(Bool.self, forKey: .cpuCreditsUnlimited) ?? false
+    }
 }
 
 /// AWS Fargate task configuration.
