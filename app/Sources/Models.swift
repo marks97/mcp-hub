@@ -482,6 +482,16 @@ struct CloudInstance: Identifiable, Codable, Hashable {
     /// Empty = no proxy. Supports socks5/socks4/http/https schemes.
     /// Example: `socks5://user:pass@home.example.com:1080`
     var proxyURL: String
+    /// Name of the docker container Claude Hub manages on this instance.
+    /// Used by cron entries (`docker exec <name> ...`), the tunnel pgrep, and
+    /// the setup-phase probe. Empty for SSH-only setups that have no container.
+    var containerName: String
+    /// Template used to wrap each cron task's shell command. Substitutions:
+    ///   {container} → instance.containerName
+    ///   {cmd}       → the inner command (cd ... && claude -p ...)
+    /// EC2/Docker default: `docker exec {container} bash -c '{cmd}'`
+    /// SSH default: `bash -c '{cmd}'` (no docker exec, run on the host directly)
+    var executionWrapper: String
 
     init(
         id: UUID = UUID(),
@@ -495,7 +505,9 @@ struct CloudInstance: Identifiable, Codable, Hashable {
         pairedProjectIds: [String] = [],
         awsCredentialsProjectPath: String = "",
         dockerImageId: UUID? = nil,
-        proxyURL: String = ""
+        proxyURL: String = "",
+        containerName: String = "claudehub",
+        executionWrapper: String = "docker exec {container} bash -c '{cmd}'"
     ) {
         self.id = id
         self.name = name
@@ -509,10 +521,12 @@ struct CloudInstance: Identifiable, Codable, Hashable {
         self.awsCredentialsProjectPath = awsCredentialsProjectPath
         self.dockerImageId = dockerImageId
         self.proxyURL = proxyURL
+        self.containerName = containerName
+        self.executionWrapper = executionWrapper
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, name, type, sshConfig, ec2Config, fargateConfig, dockerConfig, syncConfig, pairedProjectIds, awsCredentialsProjectPath, dockerImageId, proxyURL
+        case id, name, type, sshConfig, ec2Config, fargateConfig, dockerConfig, syncConfig, pairedProjectIds, awsCredentialsProjectPath, dockerImageId, proxyURL, containerName, executionWrapper
     }
 
     init(from decoder: Decoder) throws {
@@ -529,6 +543,9 @@ struct CloudInstance: Identifiable, Codable, Hashable {
         awsCredentialsProjectPath = try c.decodeIfPresent(String.self, forKey: .awsCredentialsProjectPath) ?? ""
         dockerImageId = try c.decodeIfPresent(UUID.self, forKey: .dockerImageId)
         proxyURL = try c.decodeIfPresent(String.self, forKey: .proxyURL) ?? ""
+        containerName = try c.decodeIfPresent(String.self, forKey: .containerName) ?? "claudehub"
+        let typeDefault = (type == .ssh) ? "bash -c '{cmd}'" : "docker exec {container} bash -c '{cmd}'"
+        executionWrapper = try c.decodeIfPresent(String.self, forKey: .executionWrapper) ?? typeDefault
     }
 }
 

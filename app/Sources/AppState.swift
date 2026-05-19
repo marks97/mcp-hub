@@ -3168,24 +3168,120 @@ class AppState: ObservableObject {
         return tasks
     }
 
-    /// Builds a crontab entry for a scheduled task.
-    /// For containerized instances (EC2/Fargate with Docker image), runs Claude inside the container via docker exec.
-    func buildCrontabEntry(task: ScheduledTask, cronExpression: String, remotePath: String, projectName: String, useContainer: Bool = true) -> String {
+    // MARK: - Crontab markers + parsing
+
+    /// Lines wrapping the block of Claude-Hub-managed cron entries. The block
+    /// between these markers is fully replaced on every deploy; anything
+    /// outside is preserved untouched so a user's hand-written cron lines
+    /// survive.
+    static let crontabMarkerStart = "# CLAUDE-HUB-START"
+    static let crontabMarkerEnd = "# CLAUDE-HUB-END"
+
+    /// True if a managed line is paused (commented out). A managed line
+    /// always carries a trailing `# taskid=<name>` so we can find it.
+    static func isPausedLine(_ line: String) -> Bool {
+        let t = line.trimmingCharacters(in: .whitespaces)
+        if t.isEmpty || !t.contains("taskid=") { return false }
+        // Paused = whole line is commented. The taskid marker is part of the
+        // command suffix, so a paused line looks like:  "# 0 9 * * * docker ..."
+        return t.hasPrefix("#")
+    }
+
+    /// Parsed state of one managed cron entry pulled off the remote.
+    struct RemoteTaskState {
+        let taskId: String
+        let cronExpression: String
+        let enabled: Bool
+    }
+
+    /// Parses the managed block of a crontab into per-task state.
+    func parseManagedCrontab(_ crontab: String) -> [String: RemoteTaskState] {
+        var out: [String: RemoteTaskState] = [:]
+        let lines = crontab.components(separatedBy: .newlines)
+        var inBlock = false
+        for raw in lines {
+            if raw.contains(Self.crontabMarkerStart) { inBlock = true; continue }
+            if raw.contains(Self.crontabMarkerEnd) { inBlock = false; continue }
+            guard inBlock else { continue }
+
+            // Extract taskid marker
+            guard let range = raw.range(of: "# taskid=") else { continue }
+            let taskId = raw[range.upperBound...]
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if taskId.isEmpty { continue }
+
+            let paused = Self.isPausedLine(raw)
+            // Strip leading "# " for parsing the cron fields
+            var content = raw.trimmingCharacters(in: .whitespaces)
+            if paused, content.hasPrefix("# ") { content = String(content.dropFirst(2)) }
+            else if paused, content.hasPrefix("#") { content = String(content.dropFirst(1)) }
+            let fields = content.split(separator: " ", maxSplits: 5, omittingEmptySubsequences: true)
+            guard fields.count >= 5 else { continue }
+            let cronExpr = fields[0..<5].joined(separator: " ")
+
+            out[taskId] = RemoteTaskState(taskId: taskId, cronExpression: cronExpr, enabled: !paused)
+        }
+        return out
+    }
+
+    /// Builds the inner shell command Claude Hub will wrap with the
+    /// instance's executionWrapper template. Container-based wrappers
+    /// reference container paths (/workspace/...); host-based wrappers
+    /// (SSH-only setups) reference the synced host paths.
+    private func buildInnerCommand(task: ScheduledTask, projectName: String, instance: CloudInstance) -> String {
         let taskDir = (task.filePath as NSString).deletingLastPathComponent
         let taskName = (taskDir as NSString).lastPathComponent
-
-        if useContainer {
-            // Cron runs on host, but Claude runs inside the container where Chrome/Playwright/etc are installed.
-            // Project files are at /workspace/<projectName> inside the container (mapped from host's /home/ubuntu/projects).
-            let containerSkill = "/workspace/.claudehub-tasks/\(taskName)/SKILL.md"
-            return "\(cronExpression) docker exec claudehub bash -c 'cd /workspace/\(projectName) && claude -p \"$(cat \(containerSkill))\" --permission-mode dontAsk'"
+        let usesContainer = instance.executionWrapper.contains("docker exec")
+        if usesContainer {
+            // Inside container: /workspace is the mount point of host's projects dir.
+            let skill = "/workspace/.claudehub-tasks/\(taskName)/SKILL.md"
+            return "cd /workspace/\(projectName) && claude -p \"$(cat \(skill))\" --permission-mode dontAsk"
         } else {
-            let skillPath = "~/.claude/scheduled-tasks/\(taskName)/SKILL.md"
-            return "\(cronExpression) cd \(remotePath)/\(projectName) && claude -p \"$(cat \(skillPath))\" --permission-mode dontAsk"
+            // Direct on host: use the per-instance remotePath.
+            let remote = instance.syncConfig.remotePath
+            let skill = "\(remote)/.claudehub-tasks/\(taskName)/SKILL.md"
+            return "cd \(remote)/\(projectName) && claude -p \"$(cat \(skill))\" --permission-mode dontAsk"
+        }
+    }
+
+    /// Builds a full crontab line for a task using the instance's wrapper template.
+    /// Trailing `# taskid=<name>` lets us recognize the line on the next read.
+    func buildCrontabEntry(task: ScheduledTask, cronExpression: String, projectName: String, instance: CloudInstance, paused: Bool = false) -> String {
+        let taskDir = (task.filePath as NSString).deletingLastPathComponent
+        let taskName = (taskDir as NSString).lastPathComponent
+        let inner = buildInnerCommand(task: task, projectName: projectName, instance: instance)
+        let wrapper = instance.executionWrapper
+            .replacingOccurrences(of: "{container}", with: instance.containerName)
+            .replacingOccurrences(of: "{cmd}", with: inner)
+        let line = "\(cronExpression) \(wrapper) # taskid=\(taskName)"
+        return paused ? "# \(line)" : line
+    }
+
+    /// Reads the remote crontab over SSH. Returns the full crontab text
+    /// (whatever was in `crontab -l`), or nil on error / empty.
+    func readRemoteCrontab(for instance: CloudInstance, completion: @escaping (String?) -> Void) {
+        guard let target = resolveSSHTarget(for: instance) else { completion(nil); return }
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { completion(nil); return }
+            let userHost = target.user.isEmpty ? target.host : "\(target.user)@\(target.host)"
+            var args = ["-o", "StrictHostKeyChecking=accept-new", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5"]
+            if target.port != 22 { args += ["-p", "\(target.port)"] }
+            if !target.keyPath.isEmpty {
+                args += ["-i", (target.keyPath as NSString).expandingTildeInPath]
+            }
+            args += [userHost, "crontab", "-l"]
+            let result = self.runCommand(executable: "/usr/bin/ssh", arguments: args, timeout: 10)
+            // `crontab -l` exits non-zero if no crontab exists — that's fine, just means no managed entries.
+            DispatchQueue.main.async {
+                completion(result.success ? result.stdout : nil)
+            }
         }
     }
 
     /// Deploys automation tasks to a remote instance.
+    /// Now merges with any pre-existing non-managed crontab content so the
+    /// user's hand-written cron lines are preserved.
     func deployAutomations(
         to instance: CloudInstance,
         tasks: [(task: ScheduledTask, cronExpression: String)],
@@ -3196,12 +3292,6 @@ class AppState: ObservableObject {
             completion(false, "Cannot resolve SSH target")
             return
         }
-        guard !tasks.isEmpty else {
-            completion(false, "No tasks selected")
-            return
-        }
-
-        let remotePath = instance.syncConfig.remotePath
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
@@ -3217,43 +3307,63 @@ class AppState: ObservableObject {
                 sshCmd += " -i \((target.keyPath as NSString).expandingTildeInPath)"
             }
 
-            // Ensure remote dir exists — sync to host's projects dir which is mounted into the container at /workspace
+            // Resolve where on the remote .claudehub-tasks lives. For
+            // container-based deploys we sync into ~/projects/.claudehub-tasks
+            // (mounted into the container at /workspace). For host-direct
+            // deploys (SSH-only) we sync into <remotePath>/.claudehub-tasks.
+            let usesContainer = instance.executionWrapper.contains("docker exec")
+            let remoteTasksDir = usesContainer
+                ? "~/projects/.claudehub-tasks"
+                : "\(instance.syncConfig.remotePath)/.claudehub-tasks"
+
             var mkdirArgs = ["-o", "StrictHostKeyChecking=accept-new"]
             if target.port != 22 { mkdirArgs += ["-p", "\(target.port)"] }
             if !target.keyPath.isEmpty {
                 mkdirArgs += ["-i", (target.keyPath as NSString).expandingTildeInPath]
             }
-            mkdirArgs += [userHost, "mkdir", "-p", "~/projects/.claudehub-tasks"]
+            mkdirArgs += [userHost, "mkdir", "-p", remoteTasksDir]
             _ = self.runCommand(executable: "/usr/bin/ssh", arguments: mkdirArgs)
 
-            // Sync task files into the workspace (so they're accessible inside the container at /workspace/.claudehub-tasks)
             if FileManager.default.fileExists(atPath: tasksDir) {
-                let rsyncArgs = ["-avz", "-e", sshCmd, tasksDir, "\(userHost):~/projects/.claudehub-tasks/"]
+                let rsyncArgs = ["-avz", "-e", sshCmd, tasksDir, "\(userHost):\(remoteTasksDir)/"]
                 _ = self.runCommand(executable: "/usr/bin/rsync", arguments: rsyncArgs, timeout: 60)
             }
 
-            // Step 2: Build crontab content
-            var crontabLines: [String] = [
-                "# Claude Hub automated tasks - deployed \(ISO8601DateFormatter().string(from: Date()))",
-                "SHELL=/bin/bash",
-                "PATH=/usr/local/bin:/usr/bin:/bin",
-                "",
-            ]
+            // Step 2: read existing crontab so we preserve non-managed lines.
+            let semaphore = DispatchSemaphore(value: 0)
+            var existing = ""
+            DispatchQueue.main.sync {
+                self.readRemoteCrontab(for: instance) { content in
+                    existing = content ?? ""
+                    semaphore.signal()
+                }
+            }
+            _ = semaphore.wait(timeout: .now() + 15)
+
+            // Step 3: build the new managed block.
+            var managedLines: [String] = [Self.crontabMarkerStart]
+            managedLines.append("# Claude Hub automated tasks — last deployed \(ISO8601DateFormatter().string(from: Date()))")
+            managedLines.append("SHELL=/bin/bash")
+            managedLines.append("PATH=/usr/local/bin:/usr/bin:/bin")
             for entry in tasks {
                 let line = self.buildCrontabEntry(
                     task: entry.task,
                     cronExpression: entry.cronExpression,
-                    remotePath: remotePath,
-                    projectName: projectName
+                    projectName: projectName,
+                    instance: instance,
+                    paused: false
                 )
-                crontabLines.append(line)
+                managedLines.append(line)
             }
-            let crontabContent = crontabLines.joined(separator: "\n") + "\n"
+            managedLines.append(Self.crontabMarkerEnd)
+            let managedBlock = managedLines.joined(separator: "\n")
 
-            // Step 3: Install crontab via SSH
-            // Write to temp file locally, pipe to remote crontab
+            // Step 4: splice into existing crontab.
+            let merged = self.mergeManagedBlock(into: existing, block: managedBlock)
+
+            // Step 5: install via crontab -.
             let tempFile = NSTemporaryDirectory() + "claudehub_crontab_\(UUID().uuidString)"
-            try? crontabContent.write(toFile: tempFile, atomically: true, encoding: .utf8)
+            try? merged.write(toFile: tempFile, atomically: true, encoding: .utf8)
 
             var sshArgs = ["-o", "StrictHostKeyChecking=accept-new"]
             if target.port != 22 { sshArgs += ["-p", "\(target.port)"] }
@@ -3262,7 +3372,6 @@ class AppState: ObservableObject {
             }
             sshArgs += [userHost, "crontab", "-"]
 
-            // Use bash to pipe file into ssh
             let bashResult = self.runCommand(
                 executable: "/bin/bash",
                 arguments: ["-c", "cat '\(tempFile)' | ssh \(sshArgs.map { "'\($0)'" }.joined(separator: " "))"],
@@ -3275,6 +3384,122 @@ class AppState: ObservableObject {
                 completion(bashResult.success, bashResult.success ? "Automations deployed" : bashResult.stderr)
             }
         }
+    }
+
+    /// Splices a fresh managed block into an existing crontab. Removes the
+    /// previous managed block (whatever was between the markers) and appends
+    /// the new one. Lines outside the markers are preserved as-is.
+    func mergeManagedBlock(into existing: String, block: String) -> String {
+        let lines = existing.components(separatedBy: .newlines)
+        var preserved: [String] = []
+        var inBlock = false
+        for line in lines {
+            if line.contains(Self.crontabMarkerStart) { inBlock = true; continue }
+            if line.contains(Self.crontabMarkerEnd) { inBlock = false; continue }
+            if !inBlock { preserved.append(line) }
+        }
+        // Trim trailing empty lines from preserved to avoid pileup of blank
+        // separators after multiple deploys.
+        while let last = preserved.last, last.trimmingCharacters(in: .whitespaces).isEmpty {
+            preserved.removeLast()
+        }
+        if preserved.isEmpty {
+            return block + "\n"
+        }
+        return preserved.joined(separator: "\n") + "\n\n" + block + "\n"
+    }
+
+    /// Toggles whether a single managed task line is commented out (paused)
+    /// or active. Round-trips through `crontab -l` / `crontab -` over SSH.
+    func setRemoteTaskPaused(_ paused: Bool, taskId: String, on instance: CloudInstance, completion: @escaping (Bool, String) -> Void) {
+        guard let target = resolveSSHTarget(for: instance) else {
+            completion(false, "Cannot resolve SSH target")
+            return
+        }
+        readRemoteCrontab(for: instance) { [weak self] content in
+            guard let self else { return }
+            guard let content else {
+                completion(false, "Could not read remote crontab")
+                return
+            }
+            // Rewrite the matching line.
+            var changed = false
+            let updated = content.components(separatedBy: .newlines).map { line -> String in
+                guard line.contains("# taskid=\(taskId)") else { return line }
+                let currentlyPaused = Self.isPausedLine(line)
+                if paused == currentlyPaused { return line }
+                if paused {
+                    changed = true
+                    return "# \(line)"
+                } else {
+                    changed = true
+                    var s = line.trimmingCharacters(in: .whitespaces)
+                    if s.hasPrefix("# ") { s = String(s.dropFirst(2)) }
+                    else if s.hasPrefix("#") { s = String(s.dropFirst(1)) }
+                    return s
+                }
+            }.joined(separator: "\n")
+
+            if !changed {
+                completion(true, paused ? "Already paused" : "Already active")
+                return
+            }
+
+            // Write back.
+            DispatchQueue.global(qos: .userInitiated).async {
+                let userHost = target.user.isEmpty ? target.host : "\(target.user)@\(target.host)"
+                let tempFile = NSTemporaryDirectory() + "claudehub_crontab_\(UUID().uuidString)"
+                try? updated.write(toFile: tempFile, atomically: true, encoding: .utf8)
+                var sshArgs = ["-o", "StrictHostKeyChecking=accept-new"]
+                if target.port != 22 { sshArgs += ["-p", "\(target.port)"] }
+                if !target.keyPath.isEmpty {
+                    sshArgs += ["-i", (target.keyPath as NSString).expandingTildeInPath]
+                }
+                sshArgs += [userHost, "crontab", "-"]
+                let result = self.runCommand(
+                    executable: "/bin/bash",
+                    arguments: ["-c", "cat '\(tempFile)' | ssh \(sshArgs.map { "'\($0)'" }.joined(separator: " "))"],
+                    timeout: 30
+                )
+                try? FileManager.default.removeItem(atPath: tempFile)
+                DispatchQueue.main.async {
+                    completion(result.success, result.success ? (paused ? "Paused" : "Resumed") : result.stderr)
+                }
+            }
+        }
+    }
+
+    /// Reads any `scheduled-tasks.json` files Claude Desktop maintains in
+    /// the user's isolated `~/claude-<project>/claude-code-sessions/...`
+    /// directories and returns a flat map of taskId → (cronExpression, enabled).
+    /// Used to pre-fill the cron field on first open of the Automations panel.
+    /// If the same task id appears in multiple JSONs the last one wins.
+    func macScheduledTasksByTaskId() -> [String: (cronExpression: String, enabled: Bool)] {
+        var out: [String: (cronExpression: String, enabled: Bool)] = [:]
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let fm = FileManager.default
+        guard let entries = try? fm.contentsOfDirectory(atPath: home) else { return out }
+        for entry in entries where entry.hasPrefix("claude-") {
+            let sessionsBase = "\(home)/\(entry)/claude-code-sessions"
+            guard let accounts = try? fm.contentsOfDirectory(atPath: sessionsBase) else { continue }
+            for acct in accounts {
+                let acctBase = "\(sessionsBase)/\(acct)"
+                guard let workspaces = try? fm.contentsOfDirectory(atPath: acctBase) else { continue }
+                for ws in workspaces {
+                    let path = "\(acctBase)/\(ws)/scheduled-tasks.json"
+                    guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+                          let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                          let arr = json["scheduledTasks"] as? [[String: Any]] else { continue }
+                    for item in arr {
+                        guard let id = item["id"] as? String,
+                              let cron = item["cronExpression"] as? String else { continue }
+                        let enabled = (item["enabled"] as? Bool) ?? false
+                        out[id] = (cronExpression: cron, enabled: enabled)
+                    }
+                }
+            }
+        }
+        return out
     }
 
     /// Returns paired cloud instances for a given project.

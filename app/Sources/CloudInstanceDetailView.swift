@@ -14,6 +14,14 @@ struct CloudInstanceDetailView: View {
     @State private var automationSelected: Set<String> = []
     @State private var automationProjectName: String = ""
     @State private var automationMessage: String?
+    /// Last polled per-task state on the remote crontab. Drives the UI when
+    /// the user hasn't touched a row (dirty flag is the override).
+    @State private var remoteState: [String: AppState.RemoteTaskState] = [:]
+    /// Tasks the user has touched locally — polling must not stomp these.
+    @State private var dirtyTasks: Set<String> = []
+    /// Tasks currently in flight for pause/resume.
+    @State private var pausingTasks: Set<String> = []
+    @State private var automationPollTimer: Timer?
 
     private var runtimeInfo: CloudInstanceRuntimeInfo {
         appState.cloudInstanceRuntimeInfo[instance.id] ?? CloudInstanceRuntimeInfo()
@@ -41,6 +49,13 @@ struct CloudInstanceDetailView: View {
         }
         .onAppear {
             automationTasks = appState.discoverScheduledTasks()
+            prefillFromMacScheduledTasks()
+            pollRemoteCrontab()
+            startAutomationPollTimer()
+        }
+        .onDisappear {
+            automationPollTimer?.invalidate()
+            automationPollTimer = nil
         }
         .alert("Confirm Sync", isPresented: Binding(
             get: { syncConfirmation != nil },
@@ -725,26 +740,27 @@ struct CloudInstanceDetailView: View {
 
             Spacer()
 
-            // Deploy Automations
+            // Deploy Automations — also handles the "uncheck all + deploy"
+            // case to clear the managed crontab block remotely.
             Button {
                 guard let proj = project else { return }
                 let tasks = selectedAutomationTasks
-                guard !tasks.isEmpty else {
-                    let missing = automationSelected
-                        .compactMap { id in automationTasks.first(where: { $0.id == id }) }
-                        .filter { (automationCrons[$0.id] ?? "").isEmpty }
-                        .map(\.name)
-                    if !missing.isEmpty {
-                        automationMessage = "Add a cron expression for: \(missing.joined(separator: ", "))"
-                    } else {
-                        automationMessage = "Select at least one automation"
-                    }
+                let missing = automationSelected
+                    .compactMap { id in automationTasks.first(where: { $0.id == id }) }
+                    .filter { (automationCrons[$0.id] ?? "").isEmpty }
+                    .map(\.name)
+                if !missing.isEmpty {
+                    automationMessage = "Add a cron expression for: \(missing.joined(separator: ", "))"
                     showOperationMessage(automationMessage ?? "", success: false)
                     return
                 }
                 appState.deployAutomations(to: instance, tasks: tasks, projectName: proj.name) { s, m in
                     automationMessage = m
                     showOperationMessage(m, success: s)
+                    if s {
+                        dirtyTasks.removeAll()
+                        pollRemoteCrontab()
+                    }
                 }
             } label: {
                 HStack(spacing: 3) {
@@ -755,10 +771,8 @@ struct CloudInstanceDetailView: View {
                 .foregroundStyle(Theme.orange)
             }
             .buttonStyle(.plain)
-            .disabled(project == nil || automationSelected.isEmpty)
-            .help(automationSelected.isEmpty
-                  ? "Check automations above first"
-                  : "Deploy \(automationSelected.count) selected automation(s) to this project")
+            .disabled(project == nil)
+            .help("Deploy current selection (\(automationSelected.count) task(s)) to this project. Unchecked tasks get removed from the remote crontab.")
 
             // Sync (button = push, right-click = pull)
             Button {
@@ -909,11 +923,66 @@ struct CloudInstanceDetailView: View {
             }
     }
 
+    /// Seeds cron expressions + selected state from whatever Claude Desktop's
+    /// scheduled-tasks.json files show locally. Lets the user open the panel
+    /// and see something sensible without typing.
+    private func prefillFromMacScheduledTasks() {
+        let mac = appState.macScheduledTasksByTaskId()
+        for task in automationTasks {
+            if let entry = mac[task.id], automationCrons[task.id] == nil {
+                automationCrons[task.id] = entry.cronExpression
+                if entry.enabled { automationSelected.insert(task.id) }
+            }
+        }
+    }
+
+    /// Pulls the remote crontab once and reconciles per-task state into the
+    /// UI, skipping rows the user is currently editing (dirty flag).
+    private func pollRemoteCrontab() {
+        appState.readRemoteCrontab(for: instance) { content in
+            let parsed = appState.parseManagedCrontab(content ?? "")
+            remoteState = parsed
+            for (taskId, state) in parsed {
+                guard !dirtyTasks.contains(taskId) else { continue }
+                automationCrons[taskId] = state.cronExpression
+                if state.enabled {
+                    automationSelected.insert(taskId)
+                } else {
+                    automationSelected.remove(taskId)
+                }
+            }
+        }
+    }
+
+    private func startAutomationPollTimer() {
+        automationPollTimer?.invalidate()
+        automationPollTimer = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { _ in
+            pollRemoteCrontab()
+        }
+    }
+
+    /// Comments / uncomments a single managed cron line in place — much
+    /// cheaper than a full redeploy and leaves the rest of the crontab alone.
+    private func togglePauseRemote(taskId: String, paused: Bool) {
+        pausingTasks.insert(taskId)
+        appState.setRemoteTaskPaused(paused, taskId: taskId, on: instance) { success, msg in
+            pausingTasks.remove(taskId)
+            showOperationMessage(msg, success: success)
+            if success { pollRemoteCrontab() }
+        }
+    }
+
     private func automationTaskRow(task: AppState.ScheduledTask) -> some View {
-        HStack(spacing: 10) {
+        let remote = remoteState[task.id]
+        let isDeployedActive = remote?.enabled == true
+        let isDeployedPaused = remote?.enabled == false
+        let isPausing = pausingTasks.contains(task.id)
+
+        return HStack(spacing: 10) {
             Toggle("", isOn: Binding(
                 get: { automationSelected.contains(task.id) },
                 set: { checked in
+                    dirtyTasks.insert(task.id)
                     if checked { automationSelected.insert(task.id) }
                     else { automationSelected.remove(task.id) }
                 }
@@ -922,9 +991,25 @@ struct CloudInstanceDetailView: View {
             .toggleStyle(.checkbox)
 
             VStack(alignment: .leading, spacing: 2) {
-                Text(task.name)
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(Theme.textPrimary)
+                HStack(spacing: 6) {
+                    Text(task.name)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(Theme.textPrimary)
+                    if isDeployedActive {
+                        Text("• deployed")
+                            .font(.system(size: 10))
+                            .foregroundStyle(Theme.green)
+                    } else if isDeployedPaused {
+                        Text("• paused")
+                            .font(.system(size: 10))
+                            .foregroundStyle(Theme.orange)
+                    }
+                    if dirtyTasks.contains(task.id) {
+                        Text("• edited")
+                            .font(.system(size: 10))
+                            .foregroundStyle(Theme.blue)
+                    }
+                }
                 if !task.description.isEmpty {
                     Text(task.description)
                         .font(.system(size: 10))
@@ -937,11 +1022,33 @@ struct CloudInstanceDetailView: View {
 
             TextField("cron (e.g. 0 9 * * *)", text: Binding(
                 get: { automationCrons[task.id] ?? "" },
-                set: { automationCrons[task.id] = $0 }
+                set: {
+                    if $0 != automationCrons[task.id] { dirtyTasks.insert(task.id) }
+                    automationCrons[task.id] = $0
+                }
             ))
             .textFieldStyle(.roundedBorder)
             .font(.system(size: 11, design: .monospaced))
-            .frame(width: 180)
+            .frame(width: 160)
+
+            // Per-task pause/resume — only meaningful if the task is currently
+            // managed on the remote (deployed).
+            if remote != nil {
+                Button {
+                    togglePauseRemote(taskId: task.id, paused: !isDeployedPaused)
+                } label: {
+                    if isPausing {
+                        ProgressView().controlSize(.mini)
+                    } else {
+                        Image(systemName: isDeployedPaused ? "play.fill" : "pause.fill")
+                            .font(.system(size: 10))
+                            .foregroundStyle(Theme.textSecondary)
+                    }
+                }
+                .buttonStyle(.plain)
+                .disabled(isPausing)
+                .help(isDeployedPaused ? "Resume on remote" : "Pause on remote")
+            }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)

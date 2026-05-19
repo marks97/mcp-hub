@@ -427,9 +427,11 @@ struct AddCloudInstanceSheet: View {
 
     private var dockerFields: some View {
         Group {
-            fieldGroup(label: "Image") {
-                TextField("ubuntu:24.04", text: $dockerImage)
-                    .textFieldStyle(.roundedBorder)
+            fieldGroup(label: "Image Template") {
+                imagePicker
+                Text("Claude Hub builds the selected template locally and runs the resulting image. Use \"+ Add new image\" to fork the default.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(Theme.textTertiary)
             }
             fieldGroup(label: "Container Name (optional)") {
                 TextField("auto-generated if empty", text: $dockerContainerName)
@@ -705,7 +707,7 @@ struct AddCloudInstanceSheet: View {
             return hasName && hasAWSCredentials &&
                    (fargateUseDefault || !fargateImage.trimmingCharacters(in: .whitespaces).isEmpty)
         case .docker:
-            return hasName && !dockerImage.trimmingCharacters(in: .whitespaces).isEmpty
+            return hasName  // image template defaults to bundled if none selected
         case .ssh:
             return hasName && !sshHost.trimmingCharacters(in: .whitespaces).isEmpty
         }
@@ -756,29 +758,70 @@ struct AddCloudInstanceSheet: View {
     private func provisionDocker(name: String) {
         isProvisioning = true
         provisioningError = nil
-        provisioningStatus = "Creating container..."
+        provisioningStatus = "Preparing image…"
 
         let containerName = dockerContainerName.trimmingCharacters(in: .whitespaces).isEmpty
             ? "claudehub-\(name.lowercased().replacingOccurrences(of: " ", with: "-"))"
             : dockerContainerName.trimmingCharacters(in: .whitespaces)
 
-        let instance = CloudInstance(
-            name: name,
-            type: .docker,
-            dockerConfig: DockerConfig(
-                imageName: dockerImage.trimmingCharacters(in: .whitespaces),
-                containerName: containerName
+        // Resolve picked image template (defaults to bundled).
+        let template: DockerImage = {
+            if let id = selectedDockerImageId, let img = appState.dockerImages.first(where: { $0.id == id }) {
+                return img
+            }
+            return appState.dockerImages.first(where: { $0.id == DockerImageBuilder.bundledDefaultImageId })
+                ?? DockerImageBuilder.bundledDefaultImage()
+        }()
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            // 1. Write build context to a tmp dir.
+            DispatchQueue.main.async { provisioningStatus = "Writing build context…" }
+            guard let buildCtx = DockerImageBuilder.writeBuildContext(image: template) else {
+                DispatchQueue.main.async {
+                    provisioningError = "Failed to write build context"
+                    isProvisioning = false
+                }
+                return
+            }
+            defer { try? FileManager.default.removeItem(atPath: buildCtx) }
+
+            // 2. docker build locally.
+            let tag = "claudehub-local:\(template.id.uuidString.prefix(8).lowercased())"
+            DispatchQueue.main.async { provisioningStatus = "Building image (\(tag))…" }
+            let buildResult = appState.runCommand(
+                executable: AppState.resolveExecutable("docker"),
+                arguments: ["build", "-t", tag, buildCtx],
+                timeout: 1200
             )
-        )
+            guard buildResult.success else {
+                DispatchQueue.main.async {
+                    provisioningError = "docker build failed: \(buildResult.stderr.split(separator: "\n").suffix(5).joined(separator: "\n"))"
+                    isProvisioning = false
+                }
+                return
+            }
 
-        appState.addCloudInstance(instance)
-
-        appState.dockerRun(instance) { success, message in
-            if success {
-                cancelAndDismiss()
-            } else {
-                provisioningError = message
-                isProvisioning = false
+            // 3. Register the instance with the built tag, then docker run.
+            DispatchQueue.main.async {
+                provisioningStatus = "Starting container…"
+                let instance = CloudInstance(
+                    name: name,
+                    type: .docker,
+                    dockerConfig: DockerConfig(
+                        imageName: tag,
+                        containerName: containerName
+                    ),
+                    dockerImageId: template.id
+                )
+                appState.addCloudInstance(instance)
+                appState.dockerRun(instance) { success, message in
+                    if success {
+                        cancelAndDismiss()
+                    } else {
+                        provisioningError = message
+                        isProvisioning = false
+                    }
+                }
             }
         }
     }
