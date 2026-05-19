@@ -1033,7 +1033,18 @@ struct ConnectPanelSheet: View {
                     .font(.system(size: 12, weight: .medium))
                 }
 
-                if let msg = tunnelMessage {
+                if tunnelActive {
+                    Link(destination: URL(string: "http://localhost:6080/vnc.html")!) {
+                        HStack(spacing: 3) {
+                            Image(systemName: "arrow.up.right.square")
+                                .font(.system(size: 10))
+                            Text("Open noVNC")
+                        }
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(Theme.orange)
+                    }
+                    .help("http://localhost:6080/vnc.html")
+                } else if let msg = tunnelMessage {
                     Text(msg)
                         .font(.system(size: 11))
                         .foregroundStyle(Theme.textTertiary)
@@ -1171,16 +1182,26 @@ struct ConnectPanelSheet: View {
                     .foregroundStyle(Theme.textSecondary)
 
                 if runtimeInfo.tunnelPID != nil {
-                    VStack(alignment: .leading, spacing: 6) {
-                        infoRow("Host", value: "localhost")
-                        infoRow("Port", value: "6080")
-                        infoRow("URL", value: "vnc://localhost:6080")
+                    VStack(alignment: .leading, spacing: 10) {
+                        Link(destination: URL(string: "http://localhost:6080/vnc.html")!) {
+                            HStack(spacing: 6) {
+                                Image(systemName: "safari")
+                                    .font(.system(size: 12))
+                                Text("Open in browser →")
+                                    .font(.system(size: 12, weight: .medium))
+                            }
+                            .foregroundStyle(Theme.orange)
+                        }
+
+                        infoRow("URL", value: "http://localhost:6080/vnc.html")
+                        infoRow("Native", value: "vnc://localhost:6080")
                     }
                     .padding(12)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                     .background(Theme.pampas)
                     .clipShape(RoundedRectangle(cornerRadius: Theme.smallCornerRadius))
 
-                    Text("VNC is tunneled through SSH. Open a VNC client and connect to the address above.")
+                    Text("noVNC works in any browser. The vnc:// link is for native VNC clients (RealVNC, TigerVNC, macOS Screen Sharing).")
                         .font(.system(size: 11))
                         .foregroundStyle(Theme.textTertiary)
                 } else {

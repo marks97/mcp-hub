@@ -1529,6 +1529,16 @@ struct AddCloudInstanceSheet: View {
         apt-get update
         apt-get install -y curl git unzip jq rsync ca-certificates gnupg
 
+        # 2 GB swap — keeps small instances alive when Chrome+VNC spike memory.
+        # Without this, OOM-killer freezes sshd and the box becomes unreachable.
+        if [ ! -f /swapfile ]; then
+            fallocate -l 2G /swapfile
+            chmod 600 /swapfile
+            mkswap /swapfile
+            swapon /swapfile
+            echo "/swapfile none swap sw 0 0" >> /etc/fstab
+        fi
+
         # Install Docker
         install -m 0755 -d /etc/apt/keyrings
         curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
