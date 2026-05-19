@@ -12,6 +12,7 @@ struct AddCloudInstanceSheet: View {
     @State private var ec2Region = "us-east-1"
     @State private var ec2InstanceType = "t3.small"
     @State private var ec2VolumeGB = "30"
+    @State private var ec2Unlimited = true
 
     // SSH — connect to existing machine
     @State private var sshHost = ""
@@ -199,7 +200,7 @@ struct AddCloudInstanceSheet: View {
             }
             .padding(16)
         }
-        .frame(width: 480, height: instanceType == .ec2 ? 620 : instanceType == .fargate ? 460 : instanceType == .ssh ? 480 : 380)
+        .frame(width: 480, height: instanceType == .ec2 ? 680 : instanceType == .fargate ? 460 : instanceType == .ssh ? 480 : 380)
         .onAppear {
             if let d = appState.cloudInstanceDraft {
                 // Resuming from a paused state (e.g. after editing/adding a Docker image)
@@ -208,6 +209,7 @@ struct AddCloudInstanceSheet: View {
                 ec2Region = d.ec2Region
                 ec2InstanceType = d.ec2InstanceType
                 ec2VolumeGB = d.ec2VolumeGB
+                ec2Unlimited = d.ec2Unlimited
                 sshHost = d.sshHost
                 sshUser = d.sshUser
                 sshPort = d.sshPort
@@ -250,6 +252,7 @@ struct AddCloudInstanceSheet: View {
             ec2Region: ec2Region,
             ec2InstanceType: ec2InstanceType,
             ec2VolumeGB: ec2VolumeGB,
+            ec2Unlimited: ec2Unlimited,
             sshHost: sshHost,
             sshUser: sshUser,
             sshPort: sshPort,
@@ -340,6 +343,19 @@ struct AddCloudInstanceSheet: View {
                 }
             }
 
+            if isBurstableInstanceType {
+                Toggle(isOn: $ec2Unlimited) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Unlimited CPU credits (recommended)")
+                            .font(.system(size: 12))
+                        Text("Avoids throttling when CPU credits run out. AWS bills ~$0.05/vCPU-hour over the baseline.")
+                            .font(.system(size: 10))
+                            .foregroundStyle(Theme.textTertiary)
+                    }
+                }
+                .toggleStyle(.checkbox)
+            }
+
             fieldGroup(label: "Docker Image") {
                 imagePicker
             }
@@ -368,6 +384,12 @@ struct AddCloudInstanceSheet: View {
             .background(Theme.pampas)
             .clipShape(RoundedRectangle(cornerRadius: Theme.smallCornerRadius))
         }
+    }
+
+    /// True when the picked EC2 type is burstable (t-series). Only then does
+    /// the "Unlimited CPU credits" toggle make sense.
+    private var isBurstableInstanceType: Bool {
+        ec2InstanceType.hasPrefix("t2.") || ec2InstanceType.hasPrefix("t3.") || ec2InstanceType.hasPrefix("t3a.") || ec2InstanceType.hasPrefix("t4g.")
     }
 
     /// Dynamic note showing EBS storage cost (~$0.08/GB-month gp3).
@@ -928,6 +950,12 @@ struct AddCloudInstanceSheet: View {
             if !sgId.isEmpty {
                 launchArgs += ["--security-group-ids", sgId]
             }
+            // Burstable types (t2/t3/t3a/t4g) honor the credit specification.
+            // Non-burstable types reject the flag, so we only pass it for t-series.
+            let burstable = instType.hasPrefix("t2.") || instType.hasPrefix("t3.") || instType.hasPrefix("t3a.") || instType.hasPrefix("t4g.")
+            if burstable {
+                launchArgs += ["--credit-specification", "CpuCredits=\(ec2Unlimited ? "unlimited" : "standard")"]
+            }
 
             let launchResult = appState.runCommand(
                 executable: AppState.resolveExecutable("aws"),
@@ -989,7 +1017,8 @@ struct AddCloudInstanceSheet: View {
                         keyPair: keyName,
                         securityGroup: sgId,
                         sshUser: "ubuntu",
-                        sshKeyPath: keyPath
+                        sshKeyPath: keyPath,
+                        cpuCreditsUnlimited: burstable && ec2Unlimited
                     ),
                     awsCredentialsProjectPath: credentialsSource,
                     dockerImageId: selectedDockerImageId,

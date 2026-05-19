@@ -319,6 +319,10 @@ struct EC2Config: Codable, Hashable {
     var securityGroup: String = ""
     var sshUser: String = "ec2-user"
     var sshKeyPath: String = ""
+    /// For burstable (t2/t3/t4g) instances: whether CPU credits can go negative
+    /// at $0.05/vCPU-hour to avoid throttling under sustained load.
+    /// Ignored for non-burstable types.
+    var cpuCreditsUnlimited: Bool = false
 }
 
 /// AWS Fargate task configuration.
@@ -527,6 +531,7 @@ struct CloudInstanceDraft {
     var ec2Region: String = "us-east-1"
     var ec2InstanceType: String = "t3.small"
     var ec2VolumeGB: String = "30"
+    var ec2Unlimited: Bool = true
     var sshHost: String = ""
     var sshUser: String = ""
     var sshPort: String = "22"
