@@ -119,7 +119,6 @@ struct AddCloudInstanceSheet: View {
                         fieldGroup(label: "Type") {
                             Picker("", selection: $instanceType) {
                                 Text("EC2").tag(CloudInstanceType.ec2)
-                                Text("Fargate").tag(CloudInstanceType.fargate)
                                 Text("Docker").tag(CloudInstanceType.docker)
                                 Text("SSH").tag(CloudInstanceType.ssh)
                             }
